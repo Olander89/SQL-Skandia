@@ -1,0 +1,145 @@
+--ALMMC70 Script FÖR HELGER
+
+DECLARE @StartDate DATE = '2020-09-11 00:00:00.000';
+DECLARE @EndDate DATE = '2020-09-14 00:00:00.000';
+
+BEGIN
+
+IF OBJECT_ID('dbo.ALMMC70_Rolling', 'U') IS NOT NULL 
+  DROP TABLE dbo.ALMMC70_Rolling;
+  IF OBJECT_ID('dbo.ALMMC70_New', 'U') IS NOT NULL 
+  DROP TABLE dbo.ALMMC70_New;
+  IF OBJECT_ID('dbo.ALMMC70_Leaving', 'U') IS NOT NULL 
+  DROP TABLE dbo.ALMMC70_Leaving;
+
+
+CREATE TABLE ALMMC70_Rolling
+(
+	Datum DATETIME NULL,
+	Kontonummer VARCHAR(15) NULL,
+	EkonomiProduktID VARCHAR(2),
+	SektorKod VARCHAR(6) NULL,
+	Saldo_diff_0 BIGINT NULL
+)
+
+CREATE TABLE ALMMC70_New
+(
+	Datum DATETIME NULL,
+	Kontonummer VARCHAR(15) NULL,
+	EkonomiProduktID VARCHAR(2),
+	SektorKod VARCHAR(6) NULL,
+	Saldo_diff_0 BIGINT NULL
+)
+
+CREATE TABLE ALMMC70_Leaving
+(
+	Datum DATETIME NULL,
+	Kontonummer VARCHAR(15) NULL,
+	EkonomiProduktID VARCHAR(2),
+	SektorKod VARCHAR(6) NULL,
+	Saldo_diff_0 BIGINT NULL
+)
+
+IF OBJECT_ID('#Faktinlaning_start_date', 'U') IS NOT NULL 
+  DROP TABLE #Faktinlaning_start_date;
+IF OBJECT_ID('#Faktinlaning_start_date', 'U') IS NOT NULL 
+  DROP TABLE #Faktinlaning_end_date;
+
+SELECT *
+INTO #Faktinlaning_start_date
+FROM irrbb_dm.dbo.FactInlåning
+WHERE Datum = '2020-09-11 00:00:00.000'
+AND Laddningslogik = 'Dag'
+
+SELECT *
+INTO #Faktinlaning_end_date
+FROM irrbb_dm.dbo.FactInlåning
+WHERE Datum = '2020-09-14 00:00:00.000'
+AND Laddningslogik = 'Dag'
+
+--Rolling
+INSERT INTO ALMMC70_Rolling(Datum, Kontonummer, EkonomiProduktID, SektorKod, Saldo_diff_0)
+SELECT 
+'2020-09-14 00:00:00.000',
+t1.Kontonummer,
+t1.EkonomiProduktID,
+t1.SektorKod,
+(t2.Saldo - t1.Saldo) AS Saldo_diff_0
+FROM #Faktinlaning_start_date AS t1
+INNER JOIN #Faktinlaning_end_date AS t2
+ON t1.Kontonummer = t2.kontonummer
+
+--New clients
+INSERT INTO ALMMC70_New(Datum, Kontonummer, EkonomiProduktID, SektorKod, Saldo_diff_0)
+SELECT 
+'2020-09-14 00:00:00.000',
+t1.Kontonummer,
+t1.EkonomiProduktID,
+t1.SektorKod,
+t1.Saldo AS Saldo_diff_0
+FROM #Faktinlaning_end_date AS t1
+LEFT JOIN #Faktinlaning_start_date AS t2
+ON t1.Kontonummer = t2.kontonummer
+WHERE t2.Kontonummer IS NULL
+
+-- Leaving clients
+INSERT INTO ALMMC70_Leaving(Datum, Kontonummer, EkonomiProduktID, SektorKod, Saldo_diff_0)
+SELECT 
+'2020-09-14 00:00:00.000',
+t1.Kontonummer,
+t1.EkonomiProduktID,
+t1.SektorKod,
+(0 - t1.Saldo) AS Saldo_diff_0
+FROM #Faktinlaning_start_date AS t1
+LEFT JOIN #Faktinlaning_end_date AS t2
+ON t1.Kontonummer = t2.kontonummer
+WHERE t2.Kontonummer IS NULL
+
+--Summeringar positiva
+SELECT
+'2020-09-14 00:00:00.000',
+EkonomiProduktID,
+SektorKod,
+sum(saldo_diff_0) as Total
+FROM ALMMC70_Rolling
+WHERE Saldo_diff_0 > 0
+GROUP BY Datum, EkonomiProduktID, SektorKod
+
+UNION ALL
+
+--Summeringar negativa
+SELECT
+'2020-09-14 00:00:00.000',
+EkonomiProduktID,
+SektorKod,
+sum(saldo_diff_0) as Total
+FROM ALMMC70_Rolling
+WHERE Saldo_diff_0 < 0
+GROUP BY Datum, EkonomiProduktID, SektorKod
+
+UNION ALL
+
+--Summeringar nya klienter
+SELECT
+'2020-09-14 00:00:00.000',
+EkonomiProduktID,
+SektorKod,
+sum(saldo_diff_0) as Total
+FROM ALMMC70_New
+GROUP BY Datum, EkonomiProduktID, SektorKod
+
+UNION ALL
+
+--Summeringar lämnande klienter
+SELECT
+'2020-09-14 00:00:00.000',
+EkonomiProduktID,
+SektorKod,
+sum(saldo_diff_0) as Total
+FROM ALMMC70_Leaving
+GROUP BY Datum, EkonomiProduktID, SektorKod
+
+--SET @StartDate = DATEADD(day, 1, @StartDate);
+--SET @StartDatePlusOne = DATEADD(day, 1, @StartDatePlusOne);
+
+END;
