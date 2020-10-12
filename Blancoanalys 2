@@ -1,0 +1,243 @@
+SELECT 
+kontonummer,
+räntesats,
+Produktbeskrivning
+INTO #hb
+FROM FactUtlåning a JOIN DimEkonomiProdukt b ON a.EkonomiProduktID = b.EkonomiProduktID
+WHERE b.EkonomiProduktID in ('12')
+AND RänteSats = 0
+ORDER BY Kontonummer
+
+DROP TABLE #hb
+ 
+SELECT DISTINCT 
+Kontonummer = RIGHT(b.KontoNummer, 11),
+#hb.kontonummer,
+BankKundvillkorID,
+kontotyp,
+produktbeskrivning
+FROM factbank a
+JOIN dimkonto b ON a.KontoID = b.KontoID
+JOIN dimkund c ON a.KundID = c.KundID
+JOIN #hb on RIGHT(b.KontoNummer, 11) = #hb.Kontonummer
+WHERE BankKundvillkorid IN ('5', '6', '7', '8')
+
+SELECT * FROM factbank a
+
+SELECT * FROM DimBankKundvillkor
+
+SELECT * FROM DimEkonomiProdukt
+
+DROP TABLE #temp
+
+
+
+SELECT KundID, Kontonummer, Period
+INTO #temp
+FROM FactUtlåning a
+JOIN DimEkonomiProdukt b ON a.EkonomiProduktID = b.EkonomiProduktID
+WHERE b.EkonomiProduktID in ('7', '9', '12')
+AND RänteSats = 0
+AND Period >= '201803'
+
+
+SELECT DISTINCT
+Kontonummer = RIGHT(b.KontoNummer, 11)
+--#temp.Period,
+--#temp.Produktbeskrivning
+INTO #tempAnstallda
+FROM factbank a
+JOIN dimkonto b ON a.KontoID = b.KontoID
+JOIN dimkund c ON a.KundID = c.KundID
+JOIN #temp ON RIGHT(b.KontoNummer, 11) = #temp.Kontonummer
+WHERE BankKundvillkorid IN ('5', '6', '7', '8')
+--ORDER BY Period ASC
+
+SELECT TOP(1000) * FROM dimKund
+
+SELECT * FROM Factbank a
+JOIN dimKonto b ON a.KontoID = b.KontoID
+JOIN #temp ON RIGHT(b.KontoNummer, 11) = #temp.Kontonummer
+WHERE BankKundvillkorid IN ('5', '6', '7', '8')
+
+
+
+
+ALTER TABLE kredit.[dbo].[Blancoanalys_backup]
+ADD AnstalldSkandia varchar(3) NULL;
+
+
+UPDATE kredit.[dbo].[Blancoanalys_backup] 
+SET AnstalldSkandia = CASE 
+						WHEN Kontonummer NOT IN (SELECT * FROM #Sammanställd) THEN 'Nej'
+						WHEN Kontonummer IN (SELECT * FROM #Sammanställd) THEN 'Ja'
+						--WHEN Kontonummer IN (SELECT Kontonummer FROM #Personallån2) THEN '1'
+						END
+WHERE Period = '202008'
+
+
+SELECT * FROM kredit.[dbo].[Blancoanalys_backup]
+WHERE [Typ av lån] = 'Privatlån'
+ORDER BY AnstalldSkandia, Period
+
+
+DROP TABLE #temp
+
+SELECT * INTO #Sammanställd FROM 
+(SELECT * FROM #tempAnstallda
+	UNION
+	SELECT * FROM #Personallån) as tmp
+
+
+SELECT *
+FROM FactUtlåning a
+JOIN DimEkonomiProdukt b on a.EkonomiProduktID = b.EkonomiProduktID
+WHERE b.EkonomiProduktID IN ('12')
+AND RänteSats = 0
+AND Period = '202003'
+
+
+       select  kontonummer, räntesats into #a from FactUtlåning a join DimEkonomiProdukt b on a.EkonomiProduktID = b.EkonomiProduktID where b.EkonomiProduktID in ('12')
+       and RänteSats = 0 and period = '202003'
+
+
+
+       select  Kontonummer = right(b.KontoNummer, 11), #a.kontonummer, BankKundvillkorID, kontotyp  from factbank a join dimkonto b on a.KontoID = b.KontoID join dimkund c on a.KundID = c.KundID
+       join #a on right(b.KontoNummer, 11) = #a.Kontonummer
+       where  BankKundvillkorid in ('5', '6', '7', '8')
+
+
+SELECT *
+INTO #Personallån2
+  FROM [Kredit].[dbo].[Blancoanalys_test]
+    WHERE Kontonummer IN (SELECT * FROM #Personallån)
+	AND Period = '202008'
+
+CREATE TABLE #Personallån
+(Kontonummer varchar(15))
+
+INSERT INTO #Personallån
+(Kontonummer)
+VALUES
+('91521449750'),
+('91521656888'),
+('91521659658'),
+('91521667332'),
+('91521681157'),
+('91521696944'),
+('91521700747'),
+('91521704033'),
+('91521717526'),
+('91521781445'),
+('91521782263'),
+('91521794601'),
+('91521799050'),
+('91521805573'),
+('91521816524'),
+('91521818748'),
+('91521824225'),
+('91521825353'),
+('91521830128'),
+('91521830810'),
+('91521832015'),
+('91521833399'),
+('91521834344'),
+('91521838692'),
+('91521845176'),
+('91521847330'),
+('91521859258'),
+('91521862135'),
+('91521863271'),
+('91521863379'),
+('91521876322'),
+('91521881059'),
+('91521883744'),
+('91521887359'),
+('91521889815'),
+('91521892417'),
+('91521892972'),
+('91521893049'),
+('91521893057'),
+('91521895513'),
+('91521898881'),
+('91521900223'),
+('91521901459'),
+('91521910946'),
+('91521916588'),
+('91521917746'),
+('91521925463'),
+('91521927830'),
+('91521936988'),
+('91521954315'),
+('91521955338'),
+('91521958515'),
+('91521958523'),
+('91521962113'),
+('91521968812'),
+('91521969525'),
+('91521974839'),
+('91521976521'),
+('91521986713'),
+('91521993558'),
+('91521997170'),
+('91522002814'),
+('91522003187'),
+('91522010906'),
+('91522014537'),
+('91522014693'),
+('91522017714'),
+('91522029836'),
+('91522031601'),
+('91522033892'),
+('91522034562'),
+('91522034864'),
+('91522036743'),
+('91522037642'),
+('91522038819'),
+('91522041976'),
+('91522043766'),
+('91522044614'),
+('91522055691'),
+('91522056671'),
+('91522063619'),
+('91522073770'),
+('91522079728'),
+('91522080459'),
+('91522089669'),
+('91522089685'),
+('91522095987'),
+('91522098617'),
+('91522099699'),
+('91522100778'),
+('91522106709'),
+('91522109392'),
+('91522112180'),
+('91522112202'),
+('91522112512'),
+('91522116852'),
+('91522118944'),
+('91522122143'),
+('91522122798'),
+('91522123778'),
+('91522132475'),
+('91522134826'),
+('91522138341'),
+('91522138643'),
+('91522143442'),
+('91522143485'),
+('91522143744'),
+('91522145887'),
+('91522147987'),
+('91522149033'),
+('91521669017'),
+('91521699900'),
+('91521741354'),
+('91521745694'),
+('91521754626'),
+('91521777235'),
+('91521820920'),
+('91521855929'),
+('91521873366'),
+('91521896439'),
+('91522129555'),
+('91522147111')
