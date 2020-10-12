@@ -1,0 +1,52 @@
+SELECT
+	Datum,
+	Kontonummer,
+	EkonomiProduktID,
+	SektorKod,
+	SUM(Saldo) as Total_Saldo
+	INTO #Temp_Factinlåning_ALMM_Data
+FROM irrbb_dm.dbo.FactInlåning
+WHERE Datum BETWEEN '2020-08-30 00:00:00.000' AND '2020-09-24 00:00:00.000'
+AND Laddningslogik = 'Dag'
+GROUP BY Datum, Kontonummer, EkonomiProduktID, SektorKod;
+
+DROP TABLE #Temp_Factinlåning_ALMM_Data
+DROP TABLE #Temp_Factinlåning_ALMM_Rolling_Clients
+DROP TABLE #Temp_Factinlåning_ALMM_New_Clients
+DROP TABLE #Temp_Factinlåning_ALMM_Leaving_Clients
+
+SELECT 
+	a.Datum,
+	a.ForegaendeDatum,
+	a.Kontonummer,
+	a.EkonomiProduktID,
+	a.SektorKod,
+	(0 - b.Total_Saldo) AS Saldo_diff_0
+INTO #Temp_Factinlåning_ALMM_leaving_Clients
+FROM
+
+--Daglig
+(SELECT
+	Datum,
+	DATEADD(DAY, CASE DATENAME(WEEKDAY, Datum) 
+    WHEN 'Sunday' THEN -2 
+    WHEN 'Monday' THEN -3 
+    ELSE -1 END, DATEDIFF(DAY, 0, Datum)) AS ForegaendeDatum,
+	Kontonummer,
+	EkonomiProduktID,
+	SektorKod,
+	Total_Saldo
+FROM #Temp_Factinlåning_ALMM_Data) a
+
+LEFT JOIN
+
+--Föregående bankdag
+(SELECT
+	Datum,
+	Kontonummer,
+	Total_Saldo
+FROM #Temp_Factinlåning_ALMM_Data) b
+ON b.Kontonummer = a.Kontonummer
+WHERE a.ForegaendeDatum = b.Datum
+AND b.Kontonummer IS NULL
+ORDER BY Datum ASC
