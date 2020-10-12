@@ -1,0 +1,53 @@
+/****** Script for SelectTopNRows command from SSMS  ******/
+SELECT SUM(Skuld)
+  FROM [Kredit].[dbo].[Blancoanalys_backup]
+  WHERE Period = '202008'
+  AND [Typ av lån] = 'Betal & Kreditkort'
+
+
+  SELECT COUNT([Typ av Lån]) FROM [Kredit].[dbo].[Blancoanalys_backup]
+  WHERE [Typ av lån] = 'Betal & Kreditkort'
+  AND Period = '202008' --24.583
+
+
+  --15.987st aktiva kontrakt vill vi ha
+SELECT * FROM [dbo].[Blancoanalys_backup]
+WHERE [Typ av lån] = 'Betal & Kreditkort'
+AND Period = '202008'
+
+
+DELETE FROM [dbo].[Blancoanalys_backup]
+WHERE [Typ av lån] = 'Betal & Kreditkort'
+AND Period = '201803'
+	  
+	  SELECT DISTINCT
+	  a.[KontoID],
+	  a.[Typ av lån],
+	  a.[Kredittyp],
+	  a.[Kontonummer],
+	  a.[Skuld],
+	  a.[Ränta],
+	  a.[Skuld+Ränta],
+	  a.[Steg],
+	  a.[Beviljad kredit],
+	  a.[Ej utnyttjad kredit],
+	  a.[Ny kredit],
+	  a.[Personnummer],
+	  a.[BeviljatDatum],
+	  a.[Period]
+	  INTO #temptable
+	  FROM [Kredit].[dbo].[Blancoanalys_test] a 
+	  WHERE a.[Typ av lån] = 'Betal & Kreditkort'
+	  AND Period = '201803'
+	  AND a.KontoID NOT IN
+		(SELECT KontoID
+			FROM bankdw.[MART].[dbo].[FactKontoProduktTyp_Månad]
+			WHERE ProduktTypID = '7'
+			AND Period = '2018-03-31 00:00:00.000'
+			AND SlutDatumDennaProdukt < GETDATE())
+
+INSERT INTO [dbo].[Blancoanalys_backup]
+SELECT * FROM #temptable
+
+DROP TABLE #temptable
+
