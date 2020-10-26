@@ -1,0 +1,54 @@
+/****** Script for SelectTopNRows command from SSMS  ******/
+SELECT [Kundreferens]
+      ,[Ärendenummer]
+      ,[Produkt]
+      ,[Typ_av_eftergift]
+      ,[Startdatum_eftergift]
+      ,[Slutdatum_eftergift]
+      ,[Belopp]
+      ,[Beloppstyp]
+      ,[Pågående_Avslutad]
+      ,[LoadDate]
+      ,[ExtractDate]
+      ,[FileName]
+  FROM [Kredit].[dbo].[Eftergifter]
+
+  SELECT DISTINCT LoadDate FROM [Kredit].[dbo].[Eftergifter]
+
+  SELECT COUNT(*) FROM [Kredit].[dbo].[Eftergifter]
+
+  CREATE TABLE Kredit.dbo.Eftergifter_20201021 
+  (	
+    [Lånenummer] VARCHAR(50) NULL,
+	[ÄrendeID] VARCHAR(50) NULL,
+	[KundNamn] VARCHAR(50) NULL,
+	[Typ] VARCHAR(50) NULL,
+	[Urspr_fd] DATETIME NULL,
+	[Uppgörelse_datum] DATETIME NULL,
+	[Startdatum_Eftergift] DATETIME NULL,
+	[Nytt_fd] DATETIME NULL,
+	[kapital] VARCHAR(50) NULL,
+	[ränta] VARCHAR(50) NULL,
+	[Open/Closed] VARCHAR(50) NULL,
+	[LoadDate] DATETIME NULL,
+	[ExtractDate] DATETIME NULL,
+	[FileName] nvarchar(200) NULL
+  )
+
+    CREATE TABLE STAGE.dbo.Raw_Inkasso_Eftergifter_20201021 
+  (	
+    [Lånenummer] VARCHAR(50) NULL,
+	[ÄrendeID] VARCHAR(50) NULL,
+	[KundNamn] VARCHAR(50) NULL,
+	[Typ] VARCHAR(50) NULL,
+	[Urspr_fd] DATETIME NULL,
+	[Uppgörelse_datum] DATETIME NULL,
+	[Startdatum_Eftergift] DATETIME NULL,
+	[Nytt_fd] DATETIME NULL,
+	[kapital] VARCHAR(50) NULL,
+	[ränta] VARCHAR(50) NULL,
+	[Open/Closed] VARCHAR(50) NULL,
+	[LoadDate] DATETIME NULL,
+	[ExtractDate] DATETIME NULL,
+	[FileName] nvarchar(200) NULL
+  )
