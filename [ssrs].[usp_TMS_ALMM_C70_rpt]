@@ -1,0 +1,40 @@
+USE [MART]
+GO
+
+/****** Object:  StoredProcedure [ssrs].[usp_TMS_ALMM_C70_rpt]    Script Date: 2020-11-04 16:26:56 ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+CREATE PROCEDURE [ssrs].[usp_TMS_ALMM_C70_rpt]
+
+@StartDatum as Date,
+@SlutDatum as Date
+
+AS
+
+SET NOCOUNT ON
+
+/*****************************************************************************************************
+Beskrivning : 
+Kommentar   : ALMM C70
+Exempel     : 
+******************************************************************************************************
+Skapad av   : Fredrik Olander
+Datum       : 2020-09-12
+******************************************************************************************************/
+
+SELECT * FROM (
+SELECT Datum, EkonomiProduktID, SektorKod, SUM(Saldo_diff_0) AS Total
+FROM [ssrs].[v_FactInlåning_ALMM_C70_rolling_clients]
+GROUP BY EkonomiProduktID, Datum, SektorKod) a
+WHERE a.Total != 0.0000
+AND Datum BETWEEN @StartDatum AND @SlutDatum
+ORDER BY a.Datum ASC
+
+GO
+
+
