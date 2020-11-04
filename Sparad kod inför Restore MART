@@ -1,0 +1,26 @@
+USE [MART]
+GO
+
+/****** Object:  Table [ssrs].[TMS_Inlåningsrapport_LCR_EBA_ITS_2019_REQ0452577_rpt]    Script Date: 2020-11-04 16:15:44 ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE TABLE [ssrs].[TMS_Inlåningsrapport_LCR_EBA_ITS_2019_REQ0452577_rpt](
+	[Period] [date] NOT NULL,
+	[Radkod] [varchar](50) NOT NULL,
+	[Radnamn] [varchar](200) NULL,
+	[SaldoEUR] [numeric](38, 11) NULL,
+	[SaldoSEK] [numeric](38, 11) NULL,
+	[Saldo Total] [numeric](38, 11) NULL,
+	[FontWeight] [varchar](7) NOT NULL,
+	[TextDecoration] [varchar](9) NOT NULL,
+	[BackgroundColor] [varchar](7) NULL,
+	[LeftIndent] [varchar](4) NULL,
+	[LoadDate] [datetime] NULL
+) ON [PRIMARY]
+GO
+
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------
