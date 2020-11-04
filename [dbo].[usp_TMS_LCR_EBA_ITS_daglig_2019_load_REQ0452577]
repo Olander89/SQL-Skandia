@@ -1,0 +1,1581 @@
+USE [MART]
+GO
+
+/****** Object:  StoredProcedure [dbo].[usp_TMS_LCR_EBA_ITS_daglig_2019_load_REQ0452577]    Script Date: 2020-11-04 16:28:35 ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+
+
+--EXEC [dbo].[usp_TMS_LCR_EBA_ITS_daglig_2019_load]
+
+CREATE PROCEDURE [dbo].[usp_TMS_LCR_EBA_ITS_daglig_2019_load_REQ0452577]
+
+AS
+
+/********************************************************************************************************
+Beskrivning : Förladdning av rapportdata till tabell ssrs.TMS_Inlåningsrapport_LCR_EBA_ITS_2019_rpt
+			:
+			: CHG0055441 - Inlåningsrapport ny LCR - Daglig
+			:
+Kommentar   : Används av SP: [ssrs].[usp_TMS_Inlåningsrapport_LCR_EBA_ITS_Daglig_rpt]
+			: Används i förlängningen av rapport: Inlåningsrapport LCR enligt EBA_ITS_2015-04 daglig.rdl
+Exempel     : 
+*********************************************************************************************************
+Skapad av   : Stefan Granath
+Datum       : 2016-04-12
+*********************************************************************************************************
+Reviderad   : Stefan Granath
+Datum       : 2016-04-18
+Kommentar   : Rättat VP inlåningen lite lite
+*********************************************************************************************************
+Reviderad   : Stefan Granath
+Datum       : 2016-05-10
+Kommentar   : Lagt in kunder med saldo över 500.000 EUR
+*********************************************************************************************************
+Reviderad   : Stefan Granath
+Datum       : 2016-05-10
+Kommentar   : Lagt in fix för nya kunder som saknar sektorkod i KUND
+*********************************************************************************************************
+Reviderad   : Robert Juhlin
+Datum       : 2017-03-27
+Kommentar   : Lagt in så att man kan korrigera vid inläsningsfel av TMS
+*********************************************************************************************************
+Reviderad   : Robert Juhlin
+Datum       : 2019-07-08
+Kommentar   : Ny version efter genomgång med Gunnar Söderqvist
+*********************************************************************************************************
+Reviderad   : Robert Juhlin
+Datum       : 2019-08-07
+Kommentar   : Ändrat så att företag har fler nivåer REQ0368448
+*********************************************************************************************************
+Reviderad   : Robert Juhlin
+Datum       : 2019-08-19
+Kommentar   : Ändrat så att insätningsgaratin använder FILTER från vy CtrlInsättningsGaranti
+*********************************************************************************************************
+Reviderad   : Robert Juhlin
+Datum       : 2019-08-22
+Kommentar   : Ändrat så att upplupen ränta numera ingår
+*********************************************************************************************************
+Reviderad   : Robert Juhlin
+Datum       : 2019-08-27
+Kommentar   : Lagt till 1.1.4 (flyttat ner de andra ett steg, 1.1.5 och 1.1.6)
+*********************************************************************************************************/
+
+--	OBS! Första perioden måste laddas manuellt i tabellen, ville inte bygga in logik för något som bara inträffar en gång. /SG
+
+		
+DECLARE @Error INT						--Lagra det senate felet
+DECLARE @RowCount INT					--påverkade rader
+DECLARE @ErrorSave INT					--retur värde för sp:n
+DECLARE @RunningSteps INT				--aktuellt stegnummer
+DECLARE @TotSteps INT					--totalt antal steg
+DECLARE @StartTime DATETIME				--starttid
+DECLARE @RunDate DATETIME				--timestamp för posten i destinationstabellen
+DECLARE @DestinationDB VARCHAR(50)		--destinationsdatabas
+DECLARE @DestinationTable VARCHAR(50)	--destinationstabell
+DECLARE @LoadSP VARCHAR(50)				--sp:n namn
+DECLARE @SourceDB VARCHAR(50)			--källdatabas
+DECLARE @SourceTBL VARCHAR(40)			--källtabell
+DECLARE @SourceInfo VARCHAR(100)		--källloggning
+DECLARE @DestinationInfo VARCHAR(100)	--källloggning
+DECLARE @Area VARCHAR(50)				--ytterligar info som man vill lagra i logtabellen, ex: kan utnyttjag vid en cursor för att logga olika händelser eller om det är flera tabeller i samma proc
+DECLARE @Action VARCHAR(50)				--stegets uppgift (INSERT, UPDATE, DELETE, TRUNCATE, CREATE IDEX, DROP...  etc)
+
+
+--GEMENSAMMA VARIABLER I SP:N, BEHÖVS EJ ÄNDRAS PÅ
+SET @ErrorSave = 0
+SET @Error = 0
+SET @RunDate = CURRENT_TIMESTAMP
+
+--GEMENSAMMA VARIABLER I SP:N, ÄNDRAS FÖR VARJE SP
+SET @TotSteps = 1
+SET @DestinationTable = 'ssrs.TMS_Inlåningsrapport_LCR_EBA_ITS_2019_REQ0452577_rpt'				-- om det är en tabell per SP kan denna användas annars sätt per steg
+SET @DestinationDB = 'MART'
+SET @LoadSP = 'usp_TMS_LCR_EBA_ITS_daglig_2019_load_REQ0452577'
+
+--INGÅNGS VÄRDEN FÖR FÖRSTA STEGET I SP:N
+SET @RunningSteps = 0
+SET @RowCount = 0
+SET @StartTime = CURRENT_TIMESTAMP
+
+-------------	kolla maxdatum i rapporttabellen
+
+	DECLARE @MAXTABLEDATE DATE
+	SET @MAXTABLEDATE	= (SELECT MAX(Period) FROM [ssrs].[TMS_Inlåningsrapport_LCR_EBA_ITS_2019_REQ0452577_rpt] WITH (NOLOCK))
+
+
+-------------	hitta saknade kompletta perioder från faktat som ej är laddat och senare än maxdatumet i rapporttabellen
+	
+	BEGIN TRY
+		DROP TABLE #DATESTOLOAD
+	END TRY
+	BEGIN CATCH
+	END CATCH
+
+--/*
+
+	SELECT 
+		Datum,
+		CheckSumma	= SUM(CheckSumma)
+
+	INTO #DATESTOLOAD
+	FROM (
+			SELECT 
+				Källa		= 'Bank',
+				Datum		= Period,
+				CheckSumma	= 1
+			FROM FactBank WITH (NOLOCK)
+			WHERE Period > @MAXTABLEDATE
+			GROUP BY
+				Period
+			UNION ALL
+			SELECT 
+				Källa		= 'Lån',
+				Datum		= Period,
+				CheckSumma	= 1
+			FROM FactLån WITH (NOLOCK)
+			WHERE Period > @MAXTABLEDATE
+			GROUP BY
+				Period
+			UNION ALL
+			SELECT 
+				Källa		= 'VP',
+				Datum		= BokföringsDatum,
+				CheckSumma	= 1
+			FROM FactVPKontoInnehav WITH (NOLOCK)
+			WHERE BokföringsDatum > @MAXTABLEDATE
+			GROUP BY
+				BokföringsDatum
+		) SUB
+	GROUP BY
+		Datum
+	HAVING
+		SUM(CheckSumma) = 3
+
+--*/	
+
+-- Om valutakurser inte fanns!!!!!! Ger 0 ibland annat 2.2.2
+-- Detta om valutakurser från TMS saknas eller att dessa inte är inlästa när dagjobbet körs, dvs att TMS jobbet körs efter dagjobb //Julle 2017-03-27
+-- Bortkommentera ovan laddning av #DATESTOLOAD och ersätt med nedan.
+
+/*
+DELETE FROM [ssrs].[TMS_Inlåningsrapport_LCR_EBA_ITS_2019_rpt]
+WHERE Period IN ('2020-01-28')
+--WHERE DATUM IN ('2017-04-05','2017-04-06')
+
+CREATE TABLE #DATESTOLOAD (
+	Datum DATETIME,
+	CheckSumma INT
+	)
+
+INSERT INTO #DATESTOLOAD (Datum,CheckSumma)
+
+SELECT '2020-01-28',3
+--Om Flera dagar
+--UNION 
+--SELECT '2017-03-22',3
+--UNION
+--SELECT '2017-03-23',3
+
+--SELECT * FROM [ssrs].[TMS_Inlåningsrapport_LCR_EBA_ITS_2019_rpt] WHERE DATUM IN ('2017-03-07','2017-03-22','2017-03-23')
+*/
+
+------------	LÄGG IN DE DATUM SOM SKA LADDAS I en CURSOR
+
+	DECLARE @RapportDatum AS DATE
+
+	DECLARE RapportDatum_Cursor CURSOR FOR 
+
+		SELECT 
+			Datum
+		FROM #DATESTOLOAD
+		ORDER BY Datum
+
+	OPEN RapportDatum_Cursor
+
+	FETCH NEXT FROM RapportDatum_Cursor 
+	INTO @RapportDatum
+
+	WHILE @@FETCH_STATUS = 0
+	BEGIN
+	
+
+	
+-- INGÅNGS VÄRDEN INFÖR NÄSTA STEG
+SET @RunningSteps = @RunningSteps + 1
+SET @RowCount = 0
+SET @StartTime = CURRENT_TIMESTAMP
+
+------------	STEG 2
+
+-- UNIKA VARIABLER FÖR DETTA STEG
+SET @SourceDB = 'MART'
+SET @SourceTBL = 'Faktatabeller'
+SET @SourceInfo = @SourceDB + '..' + @SourceTBL
+SET @DestinationInfo = @DestinationDB + '..' + @DestinationTable
+SET @Action = 'INSERT'
+SET @Area = 'Datum: ' + CONVERT(VARCHAR(10),@RapportDatum,120)
+
+--------------	STEG 1 INLÅNINGSDETALJER BANK OCH VP
+	
+	BEGIN TRY
+		DROP TABLE #KunderSaldo
+	END TRY
+	BEGIN CATCH
+	END CATCH
+	
+-- Bankkunder aktivprodukt inlåning	+ utlåning
+
+	SELECT 
+		Källsystem			= 'Bank',
+		Datum				= F.Period,
+		Personnummer		= K.Personnummer,
+		StartDatumKund		= k.StartDatumKund,
+		Land				= K.Land,				-- används för med högre utflöden
+		Skatteland			= K.Skatteland,
+		Produkt				= PR.ProduktTyp,
+		ProduktIG			= PR.ProduktTyp,
+		InsättningsGaranti	= case when ProduktTyp in ('Allt i Ett-konto','Likviditetskonto','Sparkonto','Eurokonto','Fasträntekonto','Betal & Kreditkort','Skandiakonto') and CIG.KOD is null then 1 else 0 end,
+		Sektorkod			= K.Sektorkod,
+		Saldo				= SUM(CASE 
+									WHEN F.Saldo < 0 THEN 0 
+									--WHEN PR.ProduktTyp = 'Eurokonto' THEN F.Saldo * (DBO.GetEuroRateDay(F.Period))	-- OBS! Day
+									WHEN PR.ProduktTyp = 'Eurokonto' THEN ISNULL(F.Upplupen_Ränta_ACK,0) + F.Saldo * (DBO.GetEuroRateDay(F.Period))	-- Ska användas när upplupen ränta finns i FactBank
+									--WHEN PR.ProduktTyp = 'Fasträntekonto' THEN F.Saldo
+									WHEN PR.ProduktTyp = 'Fasträntekonto' THEN ISNULL(F.Upplupen_Ränta_ACK,0) + F.Saldo
+									--ELSE F.Saldo END),
+									ELSE ISNULL(F.Upplupen_Ränta_ACK,0) + F.Saldo END), -- Ska användas när upplupen ränta finns i FactBank
+		SaldoIG				= case when ProduktTyp in ('Allt i Ett-konto','Likviditetskonto','Sparkonto','Eurokonto','Fasträntekonto','Betal & Kreditkort','Skandiakonto') and CIG.KOD is null then	
+								SUM(CASE 
+									WHEN F.Saldo < 0 THEN 0 
+									--WHEN PR.ProduktTyp = 'Eurokonto' THEN F.Saldo * (DBO.GetEuroRateDay(F.Period))
+									WHEN PR.ProduktTyp = 'Eurokonto' THEN ISNULL(F.Upplupen_Ränta_ACK,0) + F.Saldo * (DBO.GetEuroRateDay(F.Period)) -- Ska användas när upplupen ränta finns i FactBank
+									--WHEN PR.ProduktTyp = 'Fasträntekonto' THEN F.Saldo
+									WHEN PR.ProduktTyp = 'Fasträntekonto' THEN ISNULL(F.Upplupen_Ränta_ACK,0) + F.Saldo
+									--ELSE F.Saldo END)
+									ELSE ISNULL(F.Upplupen_Ränta_ACK,0) + F.Saldo END) -- Ska användas när upplupen ränta finns i FactBank
+								else 0 end,
+		FRKFörfallodatum	= KO.FasträntekontoFörfallodag,
+		Kort				= SUM(ISNULL(F.BankHuvudKortAntal,0) + ISNULL(F.BankExtraKortAntal,0) + ISNULL(F.ElectronHuvudkortAntal,0) + ISNULL(F.ElectronExtrakortAntal,0)),
+		Utlåning			= SUM(CASE WHEN F.Saldo < 0 THEN F.Saldo ELSE 0  END),
+		EU					= ISNULL( ISNULL(DL.EU,DL2.EU), 'N'),
+		EU1					= DL.EU,
+		EU2					= DL2.EU,
+		InternetbaseratKontoSaldoMinusFRK	= SUM(case when pr.Produkttyp IN (	'Allt i Ett-konto','Likviditetskonto','Sparkonto','Skandiadepå','Rådgivningskonto','Depåinlåning') then f.Saldo else 0 end)
+		
+	INTO #KunderSaldo
+	FROM v_FactBank F
+		INNER JOIN dbo.v_DimKundHistorik K
+			ON F.KundID = K.KundID
+		INNER JOIN v_DimProduktTyp PR WITH (NOLOCK)
+			ON F.ProduktTypID = PR.ProduktTypID
+		INNER JOIN v_DimKonto KO
+			ON F.KontoID = KO.KontoID
+		LEFT JOIN CtrlInsättningsGaranti CIG
+			ON K.Sektorkod = CIG.KOD
+		LEFT JOIN v_DimLand DL
+			ON K.Land = REPLACE( DL.Land,'','Sverige')
+		LEFT JOIN v_DimLand DL2
+			ON K.Skatteland = REPLACE( DL2.Land,'','Sverige')
+		
+	WHERE 
+		F.Period = @RapportDatum AND
+		(	F.Saldo <> 0 OR
+			(F.SlutDatumDennaProdukt > F.Period AND F.Saldo = 0) 	-- aktiva konton med saldo = noll
+		)
+	GROUP BY 
+		F.Period,
+		K.Personnummer,
+		k.StartDatumKund,
+		K.Land,
+		K.Skatteland,
+		PR.ProduktTyp,
+		K.Sektorkod,
+		KO.FasträntekontoFörfallodag,
+		DL.EU,
+		DL2.EU,
+		CIG.KOD
+	
+-- VPkunder inlåning
+
+	INSERT INTO #KunderSaldo
+		(
+		Källsystem,
+		Datum,
+		Personnummer,
+		StartDatumKund,
+		Land,
+		Skatteland,
+		Produkt,
+		ProduktIG,
+		InsättningsGaranti,
+		Sektorkod,
+		Saldo,
+		SaldoIG,
+		FRKFörfallodatum,
+		Kort,
+		Utlåning,
+		EU,
+		EU1,
+		EU2,
+		InternetbaseratKontoSaldoMinusFRK
+		)
+
+	SELECT 
+		Källsystem			= 'VP',
+		Datum				= F.BokföringsDatum,
+		Personnummer		= K.Personnummer,
+		StartDatumKund		= k.StartDatumKund,
+		Land				= K.Land,
+		Skatteland			= K.Skatteland,
+		Produkt				= CASE 
+								WHEN KO.AvstämningsKategoriKod IN ('LII', 'LIA', 'LIC', 'PIA', 'PIC', 'PII', 'PTA', 'PTC', 'TIA', 'TIC', 'TPA', 'TPAC')
+									THEN 'Skandiadepå'
+								WHEN E.EkonomiProduktID = 1 THEN 'Depåinlåning'
+								WHEN E.EkonomiProduktID = 2 THEN 'IPS'
+								WHEN E.EkonomiProduktID = 3 THEN 'Rådgivningskonto' -- RDK
+								END,
+		ProduktIG			= KO.AvstämningsKategoriKod,
+		InsättningsGaranti	= case when KO.AvstämningsKategoriKod in ('CIM','AIE DEPÅ/INTERNET','ISK','ISKR','RDK','VPR') and CIG.KOD is null then 1 else 0 end,
+		Sektorkod			= K.Sektorkod,
+		Saldo				= SUM(F.SaldoSystemvaluta),
+		SaldoIG				= case when KO.AvstämningsKategoriKod in ('CIM','AIE DEPÅ/INTERNET','ISK','ISKR','RDK','VPR') and CIG.KOD is null then SUM(F.SaldoSystemvaluta) else 0 end, 
+		FRKFörfallodatum	= NULL,
+		Kort				= 0,
+		Utlåning			= SUM(CASE WHEN KO.AvstämningsKategoriKod <> 'IPS DEPÅER' AND F.SaldoSystemvaluta < 0 THEN F.SaldoSystemvaluta ELSE 0 END),	-- IPS SKE EJ MED I UTLÅNINGSFRÅGAN
+		EU					= ISNULL( ISNULL(DL.EU,DL2.EU), 'N'),
+		EU1					= DL.EU,
+		EU2					= DL2.EU,
+
+		InternetbaseratKontoSaldoMinusFRK	= SUM(	CASE	WHEN KO.AvstämningsKategoriKod IN ('LII', 'LIA', 'LIC', 'PIA', 'PIC', 'PII', 'PTA', 'PTC', 'TIA', 'TIC', 'TPA', 'TPAC')	THEN F.SaldoSystemvaluta
+													WHEN E.EkonomiProduktID = 1 THEN F.SaldoSystemvaluta
+													WHEN E.EkonomiProduktID = 3 THEN F.SaldoSystemvaluta
+													ELSE 0 
+											END)
+
+	FROM v_FactVPKontoInnehav F WITH (NOLOCK)
+		INNER JOIN v_DimPeriod PE WITH (NOLOCK)
+			ON (F.BokföringsDatum = PE.Period)
+		INNER JOIN v_DimVPKonto KO WITH (NOLOCK)
+			INNER JOIN (SELECT
+						DepåTyp				= Depåtyp,
+						EkonomiProduktID	=	CASE 
+													WHEN DepåTyp = 'IPS DEPÅER' THEN 2	--IPS
+													WHEN DepåTyp = 'RDK' THEN 3			--Rådgivningskonto
+												ELSE 1 END								--Depåinlåning						
+						FROM v_DimDepåtyp_Inkludera
+						) E
+				ON KO.AvstämningsKategoriKod = E.DepåTyp
+			ON (F.VPKontoID = KO.VPKontoID)
+		INNER JOIN v_DimKundHistorik K WITH (NOLOCK)	
+			ON (F.KundID = K.KundID)
+		LEFT JOIN CtrlInsättningsGaranti CIG
+			ON K.Sektorkod = CIG.KOD
+		LEFT JOIN v_DimLand DL
+			ON K.Land = REPLACE( DL.Land,'','Sverige')
+		LEFT JOIN v_DimLand DL2
+			ON K.Skatteland = REPLACE( DL2.Land,'','Sverige')
+
+	WHERE 
+		F.BokföringsDatum = @RapportDatum AND
+		F.SaldoSystemvaluta > 0 AND
+		KO.AvstämningsKategoriKod IN (SELECT DISTINCT DepåTyp FROM v_DimDepåtyp_Inkludera) AND
+		1 = CASE 
+				WHEN KO.AvstämningsKategoriKod = 'IPS DEPÅER' THEN 1
+				WHEN KO.AvstämningsKategoriKod <> 'IPS DEPÅER' AND F.SaldoSystemvaluta > 0 THEN 1 END
+
+	GROUP BY 
+		F.BokföringsDatum,
+		K.Personnummer,
+		k.StartDatumKund,
+		K.Land,
+		K.Skatteland,
+		CASE 
+							WHEN KO.AvstämningsKategoriKod IN ('LII', 'LIA', 'LIC', 'PIA', 'PIC', 'PII', 'PTA', 'PTC', 'TIA', 'TIC', 'TPA', 'TPAC')	THEN 'Skandiadepå'
+							WHEN E.EkonomiProduktID = 1 THEN 'Depåinlåning'
+							WHEN E.EkonomiProduktID = 2 THEN 'IPS'
+							WHEN E.EkonomiProduktID = 3 THEN 'Rådgivningskonto' -- RDK
+							END,
+		KO.AvstämningsKategoriKod,
+		K.Sektorkod,
+
+		DL.EU,
+		DL2.EU,
+		CIG.KOD
+
+
+----------------	UPPDATERING AV SEKTORKOD PÅ NYA PRIVATPERSONER
+
+	UPDATE #KunderSaldo SET
+	
+		Sektorkod	= CASE WHEN 
+							DATEDIFF(Y,YEAR(LEFT(PERSONNUMMER,4)),YEAR(GETDATE())) 
+							>= 65 THEN '144200' ELSE '143000' END
+
+	FROM #KunderSaldo
+	WHERE Sektorkod IS NULL AND SUBSTRING(Personnummer,5,2) BETWEEN '01' AND '12'
+	
+
+----------------		TEMPTABELL FÖR UTLÅNING - FÖR ANTALPRODUKTER - RELATIONER
+
+	BEGIN TRY
+		DROP TABLE #KunderUtlåning
+	END TRY
+	BEGIN CATCH
+	END CATCH
+
+	SELECT 
+		Datum				= F.Datum,
+		Personnummer		= F.Personnummer,
+		Bolån				= SUM(CASE WHEN F.Produktbeskrivning IN (	'Bostadsrättslån','Fritidshuslån','Villalån',
+												'Skandia Bostadsrätt','Skandia Fritidshus','Skandia Villalån') THEN Antal ELSE 0 END),
+		Privatlån			= SUM(CASE WHEN F.Produktbeskrivning = 'Privatlån' THEN Antal ELSE 0 END),
+		Övrigalån			= SUM(CASE WHEN F.Produktbeskrivning NOT IN ('Bostadsrättslån','Fritidshuslån','Villalån','Skandia Bostadsrätt','Skandia Fritidshus',
+								'Skandia Villalån', 'Privatlån') THEN Antal ELSE 0 END),
+
+		AntalUtlåning_Lån	= SUM(Antal)
+
+	INTO #KunderUtlåning
+	
+	FROM (
+			SELECT 
+				Datum				= F.Period,
+				Personnummer		= KU.Personnummer,
+				Lånenummer			= KO.LåneKontonummer,
+				Produktbeskrivning	= P.Produktbeskrivning,
+				Antal				= 1
+
+			FROM v_FactLån F WITH (NOLOCK)
+				INNER JOIN v_DimKund KU WITH (NOLOCK)
+					ON (F.KundID = KU.KundID)
+				INNER JOIN v_DimLåneKonto KO WITH (NOLOCK)
+					ON (F.LånekontoID = KO.LånekontoID)
+				INNER JOIN v_DimKreditGivare KG WITH (NOLOCK)
+					ON (F.KreditGivareID = KG.KreditGivareID)
+				INNER JOIN v_DimKreditTyp KT WITH (NOLOCK)
+					LEFT JOIN v_DimEkonomiProdukt P WITH (NOLOCK)
+						ON (KT.KreditTypKod = P.ProduktKod AND P.Källsystem = 'Lån') --OBS! Ändra denna om vi byter namn på källsystem
+					ON (F.KreditTypID = KT.KreditTypID)
+		
+			WHERE 
+				F.Period = @RapportDatum AND 
+				F.AktuellSkuld <> 0 AND
+				KG.KreditGivareKod <> '12' 	
+			GROUP BY
+				F.Period,
+				KU.Personnummer,
+				KO.LåneKontonummer,
+				P.Produktbeskrivning
+		) F
+	GROUP BY 
+		F.Datum,
+		F.Personnummer
+
+----------------		SUMMERAR PER PERSONNUMMER
+
+		BEGIN TRY
+		DROP TABLE #KunderInlåning
+		END TRY
+		BEGIN CATCH
+		END CATCH
+
+		DECLARE @IG_BELOPP INT
+
+		IF @MAXTABLEDATE < '2021-01-01'
+			SET @IG_BELOPP = 950000			--// FÖRE 2021-01-01 FredrikO
+		ELSE
+			SET @IG_BELOPP = 1050000			--// EFTER 2021-01-01 FredrikO
+
+		DECLARE @KAT2_BELOPP INT		-- RETAIL -> MED HÖGRE UTFLÖDEN -> KATEGORI 2 . INSÄTTNINGAR (SALDO) STÖRRE ÄN 500.000 EUR
+		SET @KAT2_BELOPP = 500000	
+
+		SELECT 
+			Datum					= F.Datum,
+			Personnummer			= F.Personnummer,
+		    Startdatumkund			= f.StartDatumKund,
+			Land					= MAX(F.Land),		-- P.G.A. att det vid månadsskiften kan blir två olika LCRGrupper på factbank och FactVP (vp dag är också månadsdata)
+			Sektorkod				= MAX(F.Sektorkod), -- P.G.A. att det vid månadsskiften kan blir två olika LCRGrupper på factbank och FactVP (vp dag är också månadsdata)
+			LCRGrupp				= S.LCRGrupp, 
+			AlltiEttkonto			= SUM(ISNULL(CASE WHEN F.Produkt = 'Allt i Ett-konto' THEN F.Saldo END,0)),
+			BetalKreditkortIN		= SUM(ISNULL(CASE WHEN F.Produkt = 'Betal & Kreditkort' THEN F.Saldo END,0)),
+			Depåinlåning			= SUM(ISNULL(CASE WHEN F.Produkt = 'Depåinlåning' THEN F.Saldo END,0)),
+			Eurokonto				= SUM(ISNULL(CASE WHEN F.Produkt = 'Eurokonto' THEN F.Saldo END,0)),
+			Fasträntekonto			= SUM(ISNULL(CASE WHEN F.Produkt = 'Fasträntekonto' THEN F.Saldo END,0)),
+			IPS						= SUM(ISNULL(CASE WHEN F.Produkt = 'IPS' THEN F.Saldo END,0)),
+			Likviditetskonto		= SUM(ISNULL(CASE WHEN F.Produkt = 'Likviditetskonto' THEN F.Saldo END,0)),
+			Skandiakonto			= SUM(ISNULL(CASE WHEN F.Produkt = 'Skandiakonto' THEN F.Saldo END,0)),
+			Sparkonto				= SUM(ISNULL(CASE WHEN F.Produkt = 'Sparkonto' THEN F.Saldo END,0)),
+			Skandiadepå				= SUM(ISNULL(CASE WHEN F.Produkt = 'Skandiadepå' THEN F.Saldo END,0)),
+			Rådgivningskonto		= SUM(ISNULL(CASE WHEN F.Produkt = 'Rådgivningskonto' THEN F.Saldo END,0)),
+			Saldo					= SUM(ISNULL(F.Saldo,0)),
+
+			SaldoIG					= sum( case when InsättningsGaranti = 1 then F.saldo else 0 end),
+			SaldoIG_ej				= sum( case when InsättningsGaranti = 0 then F.saldo else 0 end),
+
+			InternetbaseratKontoSaldoMinusFRK	= sum(InternetbaseratKontoSaldoMinusFRK),
+			Kontokredit				= NULL,
+			BetalKreditkortUT		= NULL,
+			Kort					= SUM(ISNULL(F.Kort, 0)),
+
+			AntalUtlåning_VP		= SUM(CASE WHEN Källsystem = 'VP' AND Utlåning <> 0 THEN 1 ELSE 0 END),
+			SaldoTäcktAvIG			= CASE 
+										WHEN S.LCRGrupp IN ('CORPÖVR','CORPFINANCE','RETAIL') AND SUM(CAST(F.SaldoIG AS MONEY)) > @IG_BELOPP THEN @IG_BELOPP
+										WHEN S.LCRGrupp IN ('CORPÖVR','CORPFINANCE','RETAIL') AND SUM(CAST(F.SaldoIG AS MONEY)) <= @IG_BELOPP THEN SUM(F.SaldoIG)
+										ELSE 0
+										END										,
+			SaldoEJTäcktAvIG		= CASE 
+										WHEN S.LCRGrupp IN ('CORPÖVR','CORPFINANCE','RETAIL') AND SUM(CAST(F.SaldoIG AS MONEY)) > @IG_BELOPP THEN SUM(F.SaldoIG) - @IG_BELOPP 
+										ELSE 0
+										END,
+			StartDatumKund1år		= max(CASE WHEN StartDatumKund < DATEADD(YY,-1,F.Datum) THEN 1 ELSE 0 END),
+			FRKFörfallÖver30dgr		= SUM(CASE WHEN FRKFörfallodatum > DATEADD(D,30,F.Datum) THEN F.Saldo ELSE 0 END),
+			FRKFörfallInom30dgr		= SUM(CASE WHEN FRKFörfallodatum <= DATEADD(D,30,F.Datum) THEN F.Saldo ELSE 0 END),
+			RetailUtflödeKat1		= cast(0 as money), 
+			RetailUtflödeKat2		= cast(0 as money),
+			HuvudRadKod				=	case when S.LCRGrupp IN ('RETAIL') then 2 else 1 end,
+			EU						=	MAX(case when f.eu = 'j' then 1 else 0 end), -- P.G.A. att det vid månadsskiften kan blir två olika LCRGrupper på factbank och FactVP (vp dag är också månadsdata)
+			ValutaKurs				= max(V.ValutaKurs),
+			KAT2_BELOPP				= max(@KAT2_BELOPP),
+			IG_BELOPP				= max(@IG_BELOPP)
+
+		INTO #KunderInlåning
+
+		FROM #KunderSaldo F WITH (NOLOCK)		
+			INNER JOIN v_DimSektor2014 S
+				ON F.Sektorkod = S.SektorKod
+			LEFT JOIN (
+						SELECT 
+							Datum		= CONVERT(DATE,F.Period),
+							ValutaKurs	= ROUND(F.FrånValutaKurs,5)
+						FROM FactValutaKurs F
+							INNER JOIN DimValuta v1
+								ON F.FrånValutaID = v1.ValutaID
+							INNER JOIN DimValuta v2
+								ON F.TillValutaID = v2.ValutaID	
+							INNER JOIN v_DimPeriod p
+								ON F.Period = p.Datum
+						WHERE 
+							v1.valutakod = 'EUR' 
+					) V
+				ON F.Datum = V.Datum
+
+		GROUP BY 
+			F.Datum,
+			F.Personnummer,
+			F.StartDatumKund,
+			--F.Land,
+			--F.Sektorkod,
+			S.LCRGrupp--,
+			--f.eu
+
+
+
+----------------		UPPDATERA MED RetailUtflödeKat2
+
+	update	#KunderInlåning SET
+		--select 
+		RetailUtflödeKat2	= f2.RetailUtflödeKat2
+
+	from #KunderInlåning f
+		inner join (
+						select 
+							Personnummer,
+							RetailUtflödeKat2		=	CASE	WHEN LCRGrupp IN ('RETAIL') AND ( 
+																										(	SUM(CAST( (Saldo - Fasträntekonto)  / ValutaKurs AS MONEY)) > KAT2_BELOPP AND SUM(CAST(InternetbaseratKontoSaldoMinusFRK AS MONEY)) > 0)
+																										or
+																										( SUM(CAST( (Saldo - Fasträntekonto) / ValutaKurs AS MONEY)) > KAT2_BELOPP AND EU = 0 )
+																										) then SUM(Saldo - Fasträntekonto) else 0 end
+							
+						from #KunderInlåning 
+						group by Personnummer,LCRGrupp,KAT2_BELOPP,eu --351093
+					) f2
+			ON F.Personnummer = F2.Personnummer
+
+
+----------------		UPPDATERA MED RetailUtflödeKat1
+
+	update	#KunderInlåning SET
+		--select 
+		RetailUtflödeKat1	= f2.RetailUtflödeKat1
+
+	from #KunderInlåning f
+		inner join (
+						select 
+							Personnummer,
+							RetailUtflödeKat1		=	CASE	WHEN LCRGrupp IN ('RETAIL') AND ( 
+																										(	SUM(CAST( (Saldo - Fasträntekonto) / ValutaKurs AS MONEY)) > KAT2_BELOPP )
+																										or
+																										( SUM(CAST(InternetbaseratKontoSaldoMinusFRK AS MONEY)) > 0 AND EU = 0 )
+																										) then SUM(Saldo - Fasträntekonto) else 0 end
+							
+						from #KunderInlåning 
+						group by Personnummer,LCRGrupp,KAT2_BELOPP,eu --351093
+					) f2
+			ON F.Personnummer = F2.Personnummer
+	where f.RetailUtflödeKat2 = 0
+
+----------------		UPPDATERA MED KORTUPPGIFTER
+
+	UPDATE #KunderInlåning SET
+
+		Kontokredit			= F2.Kontokredit,
+		BetalKreditkortUT	= F2.BetalKreditkortUT
+
+	FROM #KunderInlåning F
+		INNER JOIN (
+						SELECT 
+							Personnummer		= K.Personnummer,
+							Kontokredit			= MAX(CASE WHEN PR.ProduktTypID = 1 THEN 1 ELSE 0 END),
+							BetalKreditkortUT	= MAX(CASE WHEN PR.ProduktTypID = 7 THEN 1 ELSE 0 END)
+
+						FROM v_FactBank F
+							INNER JOIN v_DimKund K
+								ON F.KundID = K.KundID
+							INNER JOIN v_DimProduktTyp PR WITH (NOLOCK)
+								ON F.ProduktTypID = PR.ProduktTypID
+						
+						WHERE 
+							F.Period = @RapportDatum AND
+							F.SlutDatumDennaProdukt > F.Period AND F.BeviljadKredit > 0 	-- aktiva konton med beviljad kredit > 0 
+							AND PR.ProduktTypID IN (1,7)									-- Aie Konto (kontokredit) och Betal & Kreditkort
+						GROUP BY 
+							K.Personnummer
+					) F2
+			ON F.Personnummer = F2.Personnummer
+
+
+----------------		INSERT GRUNDUPPGIFTER I #REPORTTABLE
+
+	-- LÄGSTA NIVÅ 3
+
+	BEGIN TRY
+		DROP TABLE #REPORTTABLE
+	END TRY
+	BEGIN CATCH
+	END CATCH
+
+	SELECT			
+		Period,
+		LCRGrupp,
+		KundTyp,
+		SaldoTotal						= SUM(Saldo),
+		SaldoEUR						= SUM(SaldoEurokonto),
+		SaldoEUR2						= SUM(Saldo * (SaldoEurokonto / saldo)),
+		SaldoSEK						= SUM(Saldo - SaldoEurokonto),
+		SaldoIG_ej						= sum(SaldoIG_ej),
+		FRKFörfallInom30dgr				= SUM(FRKFörfallInom30dgr),
+		FRKFörfallÖver30dgr				= SUM(FRKFörfallÖver30dgr),
+
+		RetailUtflödeKat1_221			= SUM(RetailUtflödeKat1),
+		RetailUtflödeKat1_221EUR		= SUM(RetailUtflödeKat1EUR),
+		RetailUtflödeKat1_221SEK		= SUM(RetailUtflödeKat1SEK),
+		RetailUtflödeKat2_222			= SUM(RetailUtflödeKat2),
+		RetailUtflödeKat2_222EUR		= SUM(RetailUtflödeKat2EUR),
+		RetailUtflödeKat2_222SEK		= SUM(RetailUtflödeKat2SEK),
+
+		Etableratförhållande_231		= SUM(Etablerat_förhållande),
+		Etableratförhållande_231EUR		= SUM(Etablerat_förhållandeEUR),
+		Etableratförhållande_231SEK		= SUM(Etablerat_förhållandeSEK),
+		E_Övrigt_242					= SUM(E_Övrigt),
+		E_Övrigt_242EUR					= SUM(E_ÖvrigtEUR),
+		E_Övrigt_242SEK					= SUM(E_ÖvrigtSEK),
+
+		Transaktionskonto_232			= SUM(Transaktionskonto),
+		Transaktionskonto_232EUR		= SUM(TransaktionskontoEUR),
+		Transaktionskonto_232SEK		= SUM(TransaktionskontoSEK),
+
+		T_Övrigt_242					= SUM(T_Övrigt),
+		T_Övrigt_242EUR					= SUM(T_ÖvrigtEUR),
+		T_Övrigt_242SEK					= SUM(T_ÖvrigtSEK),
+
+		InsättningsGaranti_241			= SUM(ÖvrigInsättningsGaranti),
+		InsättningsGaranti_241EUR		= SUM(ÖvrigInsättningsGarantiEUR),
+		InsättningsGaranti_241SEK		= SUM(ÖvrigInsättningsGarantiSEK),
+
+		InsättningsGaranti_242			= SUM(E_ÖvrigInsättningsGaranti),
+		InsättningsGaranti_242EUR		= SUM(E_ÖvrigInsättningsGarantiEUR),
+		InsättningsGaranti_242SEK		= SUM(E_ÖvrigInsättningsGarantiSEK),
+
+		Övrigt_242						= SUM(Övrigt),
+		Övrigt_242EUR					= SUM(ÖvrigtEUR),
+		Övrigt_242SEK					= SUM(ÖvrigtSEK),
+
+		totalt242						= SUM(E_Övrigt + T_Övrigt + E_ÖvrigInsättningsGaranti + Övrigt),
+		totalt242EUR					= SUM(E_ÖvrigtEUR + T_ÖvrigtEUR + E_ÖvrigInsättningsGarantiEUR + ÖvrigtEUR),
+		totalt242SEK					= SUM(E_ÖvrigtSEK+ T_ÖvrigtSEK + E_ÖvrigInsättningsGarantiSEK + ÖvrigtSEK),
+
+		SaldoEJTäcktAvIG				= SUM(Saldo - SaldoTäcktAvIG),
+		SaldoTäcktAvIG					= SUM(SaldoTäcktAvIG),
+		HuvudRadKod,
+		Företag113,
+		Företag114,
+		Företag115,
+		Företag116,
+		Företag123,
+		Eu,
+		IG_BELOPP,
+		ValutaKurs
+
+	INTO #REPORTTABLE
+	FROM (
+			select 
+				Period,
+				Personnummer,
+				KundTyp,
+				Saldo,
+				SaldoEurokonto,
+				SaldoIG,
+				SaldoIG_ej,
+				LCRGrupp,
+				FRKFörfallÖver30dgr,
+				FRKFörfallInom30dgr,
+				SaldoTäcktAvIG,	
+				AntalInlåning,	
+				AntalUtlåning,		
+				AntalProdukter,
+				SaldoAlltiEttkonto,
+				RetailUtflödeKat1,
+				RetailUtflödeKat1EUR	= case when RetailUtflödeKat1 > 0 then SaldoEurokonto else 0 end,
+				RetailUtflödeKat1SEK	= case when RetailUtflödeKat1 > 0 then RetailUtflödeKat1 - SaldoEurokonto else 0 end,
+				RetailUtflödeKat2,
+				RetailUtflödeKat2EUR	= case when RetailUtflödeKat2 > 0 then SaldoEurokonto else 0 end,
+				RetailUtflödeKat2SEK	= case when RetailUtflödeKat2 > 0 then RetailUtflödeKat2 - SaldoEurokonto else 0 end,
+
+				Etablerat_förhållande,
+				Etablerat_förhållandeEUR	= case when Etablerat_förhållande > 0 then SaldoEurokonto else 0 end,
+				Etablerat_förhållandeSEK	= case when Etablerat_förhållande > 0 then Etablerat_förhållande - SaldoEurokonto else 0 end,
+				E_Övrigt,
+				E_ÖvrigtEUR					= 0,
+				E_ÖvrigtSEK					= case when E_Övrigt > 0 then E_Övrigt else 0 end,
+
+				Transaktionskonto,
+				TransaktionskontoEUR		= 0,
+				TransaktionskontoSEK		= case when Transaktionskonto > 0 then Transaktionskonto else 0 end,
+				T_Övrigt,
+				T_ÖvrigtEUR					= 0,
+				T_ÖvrigtSEK					= case when T_Övrigt > 0 then T_Övrigt else 0 end,
+
+				ÖvrigInsättningsGaranti,
+				ÖvrigInsättningsGarantiEUR	= case when ÖvrigInsättningsGaranti > 0 then SaldoEurokonto else 0 end,
+				ÖvrigInsättningsGarantiSEK	= case when ÖvrigInsättningsGaranti > 0 then ÖvrigInsättningsGaranti - SaldoEurokonto else 0 end,
+
+				E_ÖvrigInsättningsGaranti,
+				E_ÖvrigInsättningsGarantiEUR	= case when E_ÖvrigInsättningsGaranti > 0 then SaldoEurokonto else 0 end,
+				E_ÖvrigInsättningsGarantiSEK	= case when E_ÖvrigInsättningsGaranti > 0 then E_ÖvrigInsättningsGaranti - SaldoEurokonto else 0 end,
+
+				Övrigt							= case when (RetailUtflödeKat1 + RetailUtflödeKat2 + Etablerat_förhållande + Transaktionskonto + ÖvrigInsättningsGaranti) = 0 and
+														SaldoIG_ej > 0 then SaldoIG_ej else 0 end,
+				ÖvrigtEUR							= case when (RetailUtflödeKat1 + RetailUtflödeKat2 + Etablerat_förhållande + Transaktionskonto + ÖvrigInsättningsGaranti) = 0 and
+														SaldoIG_ej > 0 then SaldoEurokonto else 0 end,
+				ÖvrigtSEK							= case when (RetailUtflödeKat1 + RetailUtflödeKat2 + Etablerat_förhållande + Transaktionskonto + ÖvrigInsättningsGaranti) = 0 and
+														SaldoIG_ej > 0 then SaldoIG_ej - SaldoEurokonto else 0 end,
+				HuvudRadKod,
+				Företag113,
+				Företag114,
+				Företag115,
+				Företag116,
+				Företag123,
+				Eu,
+				IG_BELOPP,
+				ValutaKurs
+
+			FROM (
+
+				select 
+					Period,
+					Personnummer,
+					KundTyp,
+					Saldo,
+					SaldoEurokonto,
+					SaldoIG,
+					SaldoIG_ej,
+					LCRGrupp,
+					FRKFörfallÖver30dgr,
+					FRKFörfallInom30dgr,
+					SaldoTäcktAvIG,	
+					AntalInlåning,	
+					AntalUtlåning,		
+					AntalProdukter,
+					SaldoAlltiEttkonto,
+					RetailUtflödeKat1,
+					RetailUtflödeKat2,
+					Etablerat_förhållande,
+					E_Övrigt,
+					Transaktionskonto,
+					T_Övrigt,
+					ÖvrigInsättningsGaranti		= case when (RetailUtflödeKat1 + RetailUtflödeKat2 + Etablerat_förhållande + Transaktionskonto) = 0 and
+															SaldoTäcktAvIG > 0 and SaldoTäcktAvIG <= IG_BELOPP then SaldoIG - FRKFörfallInom30dgr - FRKFörfallÖver30dgr
+
+													   when (RetailUtflödeKat1 + RetailUtflödeKat2 + Etablerat_förhållande + Transaktionskonto) = 0 and
+															SaldoTäcktAvIG > 0 and SaldoTäcktAvIG > IG_BELOPP then IG_BELOPP									
+															else 0 end,
+
+					E_ÖvrigInsättningsGaranti	= case when (RetailUtflödeKat1 + RetailUtflödeKat2 + Etablerat_förhållande + Transaktionskonto) = 0 and
+															SaldoTäcktAvIG > 0 and SaldoTäcktAvIG <= IG_BELOPP then SaldoIG - FRKFörfallInom30dgr - FRKFörfallÖver30dgr + SaldoIG_ej -- är nog inte rätt
+
+													   when (RetailUtflödeKat1 + RetailUtflödeKat2 + Etablerat_förhållande + Transaktionskonto) = 0 and
+															SaldoTäcktAvIG > 0 and SaldoTäcktAvIG > IG_BELOPP then SaldoIG - IG_BELOPP - FRKFörfallInom30dgr - FRKFörfallÖver30dgr + SaldoIG_ej -- är nog inte rätt
+															
+															else 0 end,
+															
+					HuvudRadKod,
+					Företag113,
+					Företag114,
+					Företag115,
+					Företag116,
+					Företag123,
+					Eu,
+					IG_BELOPP,
+					ValutaKurs
+
+				from (
+					select 
+						Period,
+						Personnummer,
+						KundTyp,
+						Saldo,
+						SaldoEurokonto,
+						SaldoIG,
+						SaldoIG_ej,
+						LCRGrupp,
+						FRKFörfallÖver30dgr,
+						FRKFörfallInom30dgr,
+						SaldoTäcktAvIG,	
+						AntalInlåning,	
+						AntalUtlåning,		
+						AntalProdukter,
+						SaldoAlltiEttkonto,
+						RetailUtflödeKat1,
+						RetailUtflödeKat2,
+						Etablerat_förhållande,
+						E_Övrigt,
+						Transaktionskonto			= case when		(RetailUtflödeKat1 + RetailUtflödeKat2 + Etablerat_förhållande) = 0 AND
+																	(SaldoTäcktAvIG > 0 and  SaldoAlltiEttkonto > 0 and SaldoAlltiEttkonto <= IG_BELOPP) then SaldoAlltiEttkonto
+
+														   when		(RetailUtflödeKat1 + RetailUtflödeKat2 + Etablerat_förhållande) = 0 AND
+																	(SaldoTäcktAvIG > 0 and  SaldoAlltiEttkonto > 0 and SaldoAlltiEttkonto > IG_BELOPP) then IG_BELOPP
+															
+																	 else 0 end,
+															
+						T_Övrigt					= case when		(RetailUtflödeKat1 + RetailUtflödeKat2 + Etablerat_förhållande) = 0 AND
+																	(SaldoTäcktAvIG > 0 and  SaldoAlltiEttkonto > 0 and SaldoAlltiEttkonto <= IG_BELOPP) then saldo - FRKFörfallInom30dgr - FRKFörfallÖver30dgr - SaldoAlltiEttkonto
+
+														   when		(RetailUtflödeKat1 + RetailUtflödeKat2 + Etablerat_förhållande) = 0 AND
+																	(SaldoTäcktAvIG > 0 and  SaldoAlltiEttkonto > 0 and SaldoAlltiEttkonto > IG_BELOPP) then (saldo - IG_BELOPP -FRKFörfallInom30dgr - FRKFörfallÖver30dgr)
+																	  																	  																	
+																	else 0 end,
+						HuvudRadKod,
+						Företag113,
+						Företag114,
+						Företag115,
+						Företag116,
+						Företag123,
+						Eu,
+						IG_BELOPP,
+						ValutaKurs
+
+					FROM (
+						SELECT
+							Period,
+							Personnummer				= SUB1.Personnummer,
+							KundTyp						= KundTyp,
+							Saldo,
+							SaldoEurokonto,
+							SaldoIG,
+							SaldoIG_ej,
+							LCRGrupp,
+							FRKFörfallÖver30dgr,
+							FRKFörfallInom30dgr,
+							SaldoTäcktAvIG,	
+							AntalInlåning,	
+							AntalUtlåning,		
+							AntalProdukter				=	CASE 
+															WHEN BetalKreditkortIN > 0 AND BetalKreditkortUT > 0 
+															THEN ISNULL(Kort,0) + AntalInlåning + AntalUtlåning -1
+															ELSE ISNULL(Kort,0) + AntalInlåning + AntalUtlåning 
+															END,
+							SaldoAlltiEttkonto			= ISNULL(SaldoAlltiEttkonto,0),
+							RetailUtflödeKat1			= case when RetailUtflödeKat2 > 0 then 0 else RetailUtflödeKat1 end,
+							RetailUtflödeKat2			= RetailUtflödeKat2,
+
+							Etablerat_förhållande		= case when		(RetailUtflödeKat1 + RetailUtflödeKat2) = 0 AND
+																		(SaldoTäcktAvIG > 0 and (AntalInlåningEX_AiE + StartDatumKund1år + Kort + AntalUtlåning ) > 0) AND
+																		(SaldoIG  - FRKFörfallInom30dgr - FRKFörfallÖver30dgr) <= IG_BELOPP then SaldoIG  - FRKFörfallInom30dgr - FRKFörfallÖver30dgr 
+
+															   when		(RetailUtflödeKat1 + RetailUtflödeKat2) = 0 AND
+																		(SaldoTäcktAvIG > 0 and (AntalInlåningEX_AiE + StartDatumKund1år + Kort + AntalUtlåning ) > 0) AND
+																		(SaldoIG  - FRKFörfallInom30dgr - FRKFörfallÖver30dgr) > IG_BELOPP then IG_BELOPP	
+
+																		else 0 end,
+
+							E_Övrigt					= case when		(RetailUtflödeKat1 + RetailUtflödeKat2) = 0 AND
+																		(SaldoTäcktAvIG > 0 and (AntalInlåningEX_AiE + StartDatumKund1år + Kort + AntalUtlåning ) > 0)  AND
+																		(SaldoIG  - FRKFörfallInom30dgr - FRKFörfallÖver30dgr) <= IG_BELOPP then SaldoIG_ej
+
+															   when		(RetailUtflödeKat1 + RetailUtflödeKat2) = 0 AND
+																		(SaldoTäcktAvIG > 0 and (AntalInlåningEX_AiE + StartDatumKund1år + Kort + AntalUtlåning ) > 0)  AND
+																		(SaldoIG  - FRKFörfallInom30dgr - FRKFörfallÖver30dgr) > IG_BELOPP then (SaldoIG - IG_BELOPP - FRKFörfallInom30dgr - FRKFörfallÖver30dgr) + SaldoIG_ej
+																		
+																		else 0 end,
+							HuvudRadKod,--1
+							Företag113,
+							Företag114,
+							Företag115,
+							Företag116,
+							Företag123,
+							Eu,
+							IG_BELOPP,
+							ValutaKurs
+
+						FROM (
+								SELECT 
+									Period						= F.Datum,	
+									Personnummer				= F.Personnummer,
+									StartDatumKund				= f.StartDatumKund,
+									StartDatumKund1år			= f.StartDatumKund1år,
+									Saldo						= F.Saldo,
+									SaldoEurokonto				= F.Eurokonto,
+									SaldoIG						= F.SaldoIG,
+									SaldoIG_ej					= F.SaldoIG_ej,
+									SaldoAlltiEttkonto			= F.AlltiEttkonto,
+									LCRGrupp					= F.LCRGrupp,
+									KundTyp						= ISNULL(TK.KundklassNamn,'Extern'),
+									FRKFörfallÖver30dgr			= F.FRKFörfallÖver30dgr,
+									FRKFörfallInom30dgr			= F.FRKFörfallInom30dgr,
+									SaldoTäcktAvIG				= F.SaldoTäcktAvIG,
+									AntalInlåning				= 	CASE WHEN AlltiEttkonto > 0 THEN 1 ELSE 0 END +
+																	CASE WHEN BetalKreditkortIN > 0 THEN 1 ELSE 0 END +
+																	CASE WHEN Depåinlåning > 0 THEN 1 ELSE 0 END +
+																	CASE WHEN Rådgivningskonto > 0 THEN 1 ELSE 0 END +
+																	CASE WHEN Eurokonto > 0 THEN 1 ELSE 0 END +
+																	CASE WHEN Fasträntekonto > 0 THEN 1 ELSE 0 END +
+																	CASE WHEN IPS > 0 THEN 1 ELSE 0 END +
+																	CASE WHEN Likviditetskonto > 0 THEN 1 ELSE 0 END +
+																	CASE WHEN Skandiakonto > 0 THEN 1 ELSE 0 END +
+																	CASE WHEN Sparkonto > 0 THEN 1 ELSE 0 END + 
+																	CASE WHEN Skandiadepå > 0 THEN 1 ELSE 0 END,
+									AntalInlåningEX_AiE			= 	
+																	CASE WHEN BetalKreditkortIN > 0 THEN 1 ELSE 0 END +
+																	CASE WHEN Depåinlåning > 0 THEN 1 ELSE 0 END +
+																	CASE WHEN Rådgivningskonto > 0 THEN 1 ELSE 0 END +
+																	CASE WHEN Eurokonto > 0 THEN 1 ELSE 0 END +
+																	CASE WHEN Fasträntekonto > 0 THEN 1 ELSE 0 END +
+																	CASE WHEN IPS > 0 THEN 1 ELSE 0 END +
+																	CASE WHEN Likviditetskonto > 0 THEN 1 ELSE 0 END +
+																	CASE WHEN Skandiakonto > 0 THEN 1 ELSE 0 END +
+																	CASE WHEN Sparkonto > 0 THEN 1 ELSE 0 END + 
+																	CASE WHEN Skandiadepå > 0 THEN 1 ELSE 0 END,
+									AntalUtlåning				= ISNULL(U.AntalUtlåning_Lån,0) + ISNULL(F.Kontokredit,0) + ISNULL(F.BetalKreditkortUT,0) + ISNULL(F.AntalUtlåning_VP,0),
+									Kort						= F.Kort,
+									BetalKreditkortIN			= F.BetalKreditkortIN,
+									BetalKreditkortUT			= F.BetalKreditkortUT,
+
+									RetailUtflödeKat1			= RetailUtflödeKat1,	
+									RetailUtflödeKat2			= RetailUtflödeKat2,
+									HuvudRadKod					= F.HuvudRadKod,
+									--Företag113					= case when f.lcrgrupp = 'CORPFINANCE' and ISNULL(TK.KundklassNamn,'Extern') = 'Intern' and SaldoEJTäcktAvIG <> 0 then 1 else 0 end,
+									Företag113					= case when f.lcrgrupp = 'CORPFINANCE' and ISNULL(TK.KundklassNamn,'Extern') = 'Intern' and (saldo - SaldoTäcktAvIG) <> 0 then 1 else 0 end,
+									Företag114					= case when f.lcrgrupp = 'CORPFINANCE' and ISNULL(TK.KundklassNamn,'Extern') = 'Intern' and (SaldoTäcktAvIG) <> 0 then 1 else 0 end,
+									Företag115					= case when (S.SektorKod IN ('121000','212100') OR S.HuvudGruppKod = '13') and f.lcrgrupp = 'CORPFINANCE' then 1 else 0 end,
+									Företag116					= case when S.SektorKod IN ('122100','122200','122300','122400') then 1 else 0 end,
+									Företag123					= case when (S.SektorKod IN ('121000','212100') OR S.HuvudGruppKod = '13') and f.lcrgrupp = 'CORPÖVR' then 1 else 0 end,
+									EU							= F.EU,
+									IG_BELOPP					= f.IG_BELOPP,
+									ValutaKurs					= F.ValutaKurs
+
+								FROM #KunderInlåning F
+									INNER JOIN v_DimSektor2014 S
+										ON F.SektorKod = S.SektorKod
+									LEFT JOIN #KunderUtlåning U
+										ON F.Personnummer = U.Personnummer
+									LEFT JOIN CtrlTMSKundKlassning TK
+										ON F.Personnummer = TK.Personnummer
+											and f.Datum between tk.DwhFromDate and tk.DwhToDate
+								where Saldo > 0
+								) SUB1
+							)SUB0
+
+						)sub00
+
+					)sub000
+				)SUB
+
+	GROUP BY
+		Period,
+		LCRGrupp,
+		KundTyp,
+		HuvudRadKod,
+		Eu,
+		IG_BELOPP,
+		ValutaKurs,
+		Företag113,
+		Företag114,
+		Företag115,
+		Företag116,
+		Företag123
+
+
+
+----------------		INSERT TILL RAPPORTTABELL
+
+INSERT INTO ssrs.TMS_Inlåningsrapport_LCR_EBA_ITS_2019_REQ0452577_rpt (Period,Radkod,Radnamn,SaldoEUR,SaldoSEK,SaldoTotal,FontWeight,TextDecoration,BackgroundColor,LeftIndent,LoadDate)
+SELECT 
+	Period				= MAX( CAST(f.Period AS DATE) ),
+	Radkod				=	'100',
+	Radnamn				=	cast('1 Företagsinlåning' as varchar(100)),
+	SaldoEUR			=	sum(case when LCRGrupp = 'CORPFINANCE' or LCRGrupp = 'CORPÖVR' then f.SaldoEUR else 0 end),
+	SaldoSEK			=	sum(case when LCRGrupp = 'CORPFINANCE' or LCRGrupp = 'CORPÖVR' then f.SaldoSEK else 0 end),
+	SaldoTotal			=	sum(case when LCRGrupp = 'CORPFINANCE' or LCRGrupp = 'CORPÖVR' then f.SaldoTotal else 0 end),
+    FontWeight			= 'Bold',
+    TextDecoration		= 'Default',
+    BackgroundColor		= NULL,
+	LeftIndent			= '0pt',
+	LoadDate			= NULL
+FROM #REPORTTABLE f
+
+UNION ALL
+
+SELECT 
+	Period				= MAX( CAST(f.Period AS DATE) ),
+	Radkod				=	'110',
+	Radnamn				=	cast('1.1 Finansiella bolag' as varchar(100)),
+	SaldoEUR			=	sum(case when LCRGrupp = 'CORPFINANCE' then f.SaldoEur else 0 end),
+	SaldoSEK			=	sum(case when LCRGrupp = 'CORPFINANCE' then f.SaldoSEK else 0 end),
+	SaldoTotal			=	sum(case when LCRGrupp = 'CORPFINANCE' then f.SaldoTotal else 0 end),
+    FontWeight			= 'Bold',
+    TextDecoration		= 'Default',
+    BackgroundColor		= NULL,
+	LeftIndent			= '8pt',
+	LoadDate			= NULL
+FROM #REPORTTABLE f
+
+UNION ALL
+
+SELECT 
+	Period				= MAX( CAST(f.Period AS DATE) ),
+	Radkod				=	'111',
+	Radnamn				=	cast('1.1.1 Som inte täcks av insättningsgaranti' as varchar(100)),
+	SaldoEUR			= 0,
+	SaldoSEK			= sum(case when LCRGrupp = 'CORPFINANCE' then f.SaldoEJTäcktAvIG else 0 end),
+	SaldoTotal			= sum(case when LCRGrupp = 'CORPFINANCE' then f.SaldoEJTäcktAvIG else 0 end),
+    FontWeight			= 'Default',
+    TextDecoration		= 'Default',
+    BackgroundColor		= NULL,
+	LeftIndent			= '16pt',
+	LoadDate			= NULL
+FROM #REPORTTABLE f
+
+UNION ALL
+
+SELECT 
+	Period				= MAX( CAST(f.Period AS DATE) ),
+	Radkod				=	'112',
+	Radnamn				=	cast('1.1.2 Som täcks av insättningsgaranti' as varchar(100)),
+	SaldoEUR			= 0,
+	SaldoSEK			= sum(case when LCRGrupp = 'CORPFINANCE' then f.SaldoTäcktAvIG else 0 end),
+	SaldoTotal			= sum(case when LCRGrupp = 'CORPFINANCE' then f.SaldoTäcktAvIG else 0 end),
+    FontWeight			= 'Default',
+    TextDecoration		= 'Default',
+    BackgroundColor		= NULL,
+	LeftIndent			= '16pt',
+	LoadDate			= NULL
+FROM #REPORTTABLE f
+
+UNION ALL
+
+SELECT 
+	Period				= MAX( CAST(f.Period AS DATE) ),
+	Radkod				=	'113',
+	Radnamn				=	cast('1.1.3 Varav inlåning med operativa ändamål som inte täcks av insättningsgaratin' as varchar(100)),
+	SaldoEUR			= 0,
+	SaldoSEK			= sum(case when Företag113 = 1 then f.SaldoEJTäcktAvIG else 0 end),
+	SaldoTotal			= sum(case when Företag113 = 1 then f.SaldoEJTäcktAvIG else 0 end),
+    FontWeight			= 'Default',
+    TextDecoration		= 'Default',
+    BackgroundColor		= NULL,
+	LeftIndent			= '16pt',
+	LoadDate			= NULL
+FROM #REPORTTABLE f
+
+UNION ALL
+
+SELECT 
+	Period				= MAX( CAST(f.Period AS DATE) ),
+	Radkod				=	'114',
+	Radnamn				=	cast('1.1.4 Varav inlåning med operativa ändamål som täcks av insättningsgaratin' as varchar(100)),
+	SaldoEUR			= 0,
+	SaldoSEK			= sum(case when Företag114 = 1 then f.SaldoTäcktAvIG else 0 end),
+	SaldoTotal			= sum(case when Företag114 = 1 then f.SaldoTäcktAvIG else 0 end),
+    FontWeight			= 'Default',
+    TextDecoration		= 'Default',
+    BackgroundColor		= NULL,
+	LeftIndent			= '16pt',
+	LoadDate			= NULL
+FROM #REPORTTABLE f
+
+UNION ALL
+
+SELECT 
+	Period				= MAX( CAST(f.Period AS DATE) ),
+	Radkod				=	'115',
+	Radnamn				=	cast('1.1.5 Varav inlåning från sovereigns, central banks, Multilateral Development Banks and Public Sector Entities.' as varchar(200)),
+	SaldoEUR			= sum(case when LCRGrupp = 'CORPFINANCE'  and Företag115 = 1 then f.SaldoEUR else 0 end),
+	SaldoSEK			= sum(case when LCRGrupp = 'CORPFINANCE'  and Företag115 = 1 then f.SaldoSEK else 0 end),
+	SaldoTotal			= sum(case when LCRGrupp = 'CORPFINANCE'  and Företag115 = 1 then f.SaldoTotal else 0 end),
+    FontWeight			= 'Default',
+    TextDecoration		= 'Default',
+    BackgroundColor		= NULL,
+	LeftIndent			= '16pt',
+	LoadDate			= NULL
+FROM #REPORTTABLE f
+
+UNION ALL
+
+SELECT 
+	Period				= MAX( CAST(f.Period AS DATE) ),
+	Radkod				=	'116',
+	Radnamn				=	cast('1.1.6 Varav inlåning från kreditinstitut' as varchar(100)),
+	SaldoEUR			= sum(case when LCRGrupp = 'CORPFINANCE'  and Företag116 = 1 then f.SaldoEUR else 0 end),
+	SaldoSEK			= sum(case when LCRGrupp = 'CORPFINANCE'  and Företag116 = 1 then f.SaldoSEK else 0 end),
+	SaldoTotal			= sum(case when LCRGrupp = 'CORPFINANCE'  and Företag116 = 1 then f.SaldoTotal else 0 end),
+    FontWeight			= 'Default',
+    TextDecoration		= 'Default',
+    BackgroundColor		= NULL,
+	LeftIndent			= '16pt',
+	LoadDate			= NULL
+FROM #REPORTTABLE f
+
+UNION ALL
+
+SELECT 
+	Period				= MAX( CAST(f.Period AS DATE) ),
+	Radkod				=	'120',
+	Radnamn				=	cast('1.2 Icke finansiella bolag' as varchar(100)),
+	SaldoEUR			= sum(case when LCRGrupp = 'CORPÖVR' then f.SaldoEUR else 0 end),
+	SaldoSEK			= sum(case when LCRGrupp = 'CORPÖVR' then f.SaldoSEK else 0 end),
+	SaldoTotal			= sum(case when LCRGrupp = 'CORPÖVR' then f.SaldoTotal else 0 end),
+    FontWeight			= 'Bold',
+    TextDecoration		= 'Default',
+    BackgroundColor		= NULL,
+	LeftIndent			= '8pt',
+	LoadDate			= NULL
+FROM #REPORTTABLE f
+
+UNION ALL
+
+SELECT 
+	Period				= MAX( CAST(f.Period AS DATE) ),
+	Radkod				=	'121',
+	Radnamn				=	cast('1.2.1 Som inte täcks av insättningsgaranti' as varchar(100)),
+	SaldoEUR			= 0,
+	SaldoSEK			= sum(case when LCRGrupp = 'CORPÖVR' then f.SaldoEJTäcktAvIG else 0 end),
+	SaldoTotal			= sum(case when LCRGrupp = 'CORPÖVR' then f.SaldoEJTäcktAvIG else 0 end),
+    FontWeight			= 'Default',
+    TextDecoration		= 'Default',
+    BackgroundColor		= NULL,
+	LeftIndent			= '16pt',
+	LoadDate			= NULL
+FROM #REPORTTABLE f
+
+UNION ALL
+
+SELECT 
+	Period				= MAX( CAST(f.Period AS DATE) ),
+	Radkod				=	'122',
+	Radnamn				=	cast('1.2.2 Som täcks av insättningsgaranti' as varchar(100)),
+	SaldoEUR			= 0,
+	SaldoSEK			= sum(case when LCRGrupp = 'CORPÖVR' then f.SaldoTäcktAvIG else 0 end),
+	SaldoTotal			= sum(case when LCRGrupp = 'CORPÖVR' then f.SaldoTäcktAvIG else 0 end),
+    FontWeight			= 'Default',
+    TextDecoration		= 'Default',
+    BackgroundColor		= NULL,
+	LeftIndent			= '16pt',
+	LoadDate			= NULL
+FROM #REPORTTABLE f
+
+UNION ALL
+
+SELECT 
+	Period				= MAX( CAST(f.Period AS DATE) ),
+	Radkod				=	'123',
+	Radnamn				=	cast('1.2.3 Varav inlåning från sovereigns, central banks, Multilateral Development Banks and Public Sector Entities.' as varchar(200)),
+	SaldoEUR			= sum(case when LCRGrupp = 'CORPÖVR' and Företag123 = 1 then f.SaldoEUR else 0 end),
+	SaldoSEK			= sum(case when LCRGrupp = 'CORPÖVR' and Företag123 = 1 then f.SaldoSEK else 0 end),
+	SaldoTotal			= sum(case when LCRGrupp = 'CORPÖVR' and Företag123 = 1 then f.SaldoTotal else 0 end),
+    FontWeight			= 'Default',
+    TextDecoration		= 'Default',
+    BackgroundColor		= NULL,
+	LeftIndent			= '16pt',
+	LoadDate			= NULL
+FROM #REPORTTABLE f
+
+UNION ALL
+
+SELECT 
+	Period				= MAX( CAST(f.Period AS DATE) ),
+	Radkod				=	'200',
+	Radnamn				=	'2 Inlåning från allmänheten',
+	SaldoEUR			= sum(case when LCRGrupp = 'RETAIL' then f.SaldoEUR else 0 end),
+	SaldoSEK			= sum(case when LCRGrupp = 'RETAIL' then f.SaldoSEK else 0 end),
+	SaldoTotal			= sum(case when LCRGrupp = 'RETAIL' then f.SaldoTotal else 0 end),
+    FontWeight			= 'Bold',
+    TextDecoration		= 'Default',
+    BackgroundColor		= NULL,
+	LeftIndent			= '0pt',
+	LoadDate			= NULL
+FROM #REPORTTABLE f
+
+UNION ALL
+
+SELECT
+	Period		= MAX( CAST(f.Period AS DATE) ), 
+	Radkod	=	'210',
+	Radnamn	=	'2.1 Inlåning med fast räntebindning (FRK)',
+	SaldoEUR			= 0,
+	SaldoSEK			= sum(case when f.LCRGrupp = 'RETAIL' and (f.FRKFörfallInom30dgr > 0 or f.FRKFörfallÖver30dgr > 0) then f.FRKFörfallInom30dgr +  f.FRKFörfallÖver30dgr else 0 end),
+	SaldoTotal			= sum(case when f.LCRGrupp = 'RETAIL' and (f.FRKFörfallInom30dgr > 0 or f.FRKFörfallÖver30dgr > 0) then f.FRKFörfallInom30dgr +  f.FRKFörfallÖver30dgr else 0 end),
+    FontWeight			= 'Bold',
+    TextDecoration		= 'Default',
+    BackgroundColor		= NULL,
+	LeftIndent			= '8pt',
+	LoadDate			= NULL
+FROM #REPORTTABLE f
+
+UNION ALL
+
+SELECT 
+	Period		= MAX( CAST(f.Period AS DATE) ),
+	Radkod	=	'211',
+	Radnamn	=	'2.1.1 Hushållsinlåning som förfaller inom 30 dagar',
+	SaldoEUR			= 0,
+	SaldoSEK			= sum(case when f.LCRGrupp = 'RETAIL' and f.FRKFörfallInom30dgr > 0 then f.FRKFörfallInom30dgr else 0 end),
+	SaldoTotal			= sum(case when f.LCRGrupp = 'RETAIL' and f.FRKFörfallInom30dgr > 0 then f.FRKFörfallInom30dgr else 0 end),
+    FontWeight			= 'Default',
+    TextDecoration		= 'Default',
+    BackgroundColor		= NULL,
+	LeftIndent			= '16pt',
+	LoadDate			= NULL
+FROM #REPORTTABLE f
+
+UNION ALL
+
+SELECT 
+	Period		= MAX( CAST(f.Period AS DATE) ),
+	Radkod	=	'212',
+	Radnamn	=	'2.1.2 Hushållsinlåning som inte förfaller inom 30 dagar',
+	SaldoEUR			= 0,
+	SaldoSEK			= sum(case when f.LCRGrupp = 'RETAIL' and f.FRKFörfallÖver30dgr > 0  then f.FRKFörfallÖver30dgr else 0 end),
+	SaldoTotal			= sum(case when f.LCRGrupp = 'RETAIL' and f.FRKFörfallÖver30dgr > 0  then f.FRKFörfallÖver30dgr else 0 end),
+    FontWeight			= 'Default',
+    TextDecoration		= 'Default',
+    BackgroundColor		= NULL,
+	LeftIndent			= '16pt',
+	LoadDate			= NULL
+FROM #REPORTTABLE f
+
+UNION ALL
+
+SELECT 
+	Period		= MAX( CAST(f.Period AS DATE) ),
+	Radkod	=	'220',
+	Radnamn	=	'2.2 Inlåning med högre utflöden',
+	SaldoEUR			= sum(	(case when f.LCRGrupp = 'RETAIL' and (f.RetailUtflödeKat1_221 > 0) then f.RetailUtflödeKat1_221EUR else 0 end)
+							+	(case when f.LCRGrupp = 'RETAIL' and (f.RetailUtflödeKat2_222 > 0) then f.RetailUtflödeKat2_222EUR else 0 end)),
+	SaldoSEK			= sum(	(case when f.LCRGrupp = 'RETAIL' and (f.RetailUtflödeKat1_221 > 0) then f.RetailUtflödeKat1_221SEK else 0 end)
+							+	(case when f.LCRGrupp = 'RETAIL' and (f.RetailUtflödeKat2_222 > 0) then f.RetailUtflödeKat2_222SEK else 0 end)),
+	SaldoTotal			= sum(case when f.LCRGrupp = 'RETAIL' and (f.RetailUtflödeKat1_221 > 0 or  f.RetailUtflödeKat2_222 > 0) then f.RetailUtflödeKat1_221 + f.RetailUtflödeKat2_222 else 0 end),
+    FontWeight			= 'Bold',
+    TextDecoration		= 'Default',
+    BackgroundColor		= NULL,
+	LeftIndent			= '8pt',
+	LoadDate			= NULL
+FROM #REPORTTABLE f
+
+UNION ALL
+
+SELECT 
+	Period		= MAX( CAST(f.Period AS DATE) ),
+	Radkod	=	'221',
+	Radnamn	=	'2.2.1 Kategori 1',
+	SaldoEUR			= sum(case when f.LCRGrupp = 'RETAIL' and f.RetailUtflödeKat1_221 > 0  then f.RetailUtflödeKat1_221EUR else 0 end),
+	SaldoSEK			= sum(case when f.LCRGrupp = 'RETAIL' and f.RetailUtflödeKat1_221 > 0  then f.RetailUtflödeKat1_221SEK else 0 end),
+	SaldoTotal			= sum(case when f.LCRGrupp = 'RETAIL' and f.RetailUtflödeKat1_221 > 0  then f.RetailUtflödeKat1_221 else 0 end),
+    FontWeight			= 'Default',
+    TextDecoration		= 'Default',
+    BackgroundColor		= NULL,
+	LeftIndent			= '16pt',
+	LoadDate			= NULL
+FROM #REPORTTABLE f
+
+UNION ALL
+
+SELECT 
+	Period		= MAX( CAST(f.Period AS DATE) ),
+	Radkod	=	'222',
+	Radnamn	=	'2.2.2 Kategori 2',
+	SaldoEUR			= sum(case when f.LCRGrupp = 'RETAIL' and f.RetailUtflödeKat2_222 > 0  then f.RetailUtflödeKat2_222EUR else 0 end),
+	SaldoSEK			= sum(case when f.LCRGrupp = 'RETAIL' and f.RetailUtflödeKat2_222 > 0  then f.RetailUtflödeKat2_222SEK else 0 end),
+	SaldoTotal			= sum(case when f.LCRGrupp = 'RETAIL' and f.RetailUtflödeKat2_222 > 0  then f.RetailUtflödeKat2_222 else 0 end),
+    FontWeight			= 'Default',
+    TextDecoration		= 'Default',
+    BackgroundColor		= NULL,
+	LeftIndent			= '16pt',
+	LoadDate			= NULL
+FROM #REPORTTABLE f
+
+UNION ALL
+
+SELECT 
+	Period		= MAX( CAST(f.Period AS DATE) ),
+	Radkod	=	'230',
+	Radnamn	=	'2.3 Villkorad inlåning täckt av insättningsgaranti',
+	SaldoEUR			= sum(	(case when f.LCRGrupp = 'RETAIL' and (f.Etableratförhållande_231 > 0) then f.Etableratförhållande_231EUR else 0 end)
+							+	(case when f.LCRGrupp = 'RETAIL' and (f.Transaktionskonto_232 > 0) then f.Transaktionskonto_232EUR else 0 end)),
+	SaldoSEK			= sum(	(case when f.LCRGrupp = 'RETAIL' and (f.Etableratförhållande_231 > 0) then f.Etableratförhållande_231SEK else 0 end)
+							+	(case when f.LCRGrupp = 'RETAIL' and (f.Transaktionskonto_232 > 0) then f.Transaktionskonto_232SEK else 0 end)),
+	SaldoTotal			= sum(case when f.LCRGrupp = 'RETAIL' and (f.Etableratförhållande_231 > 0 or f.Transaktionskonto_232 > 0) then f.Etableratförhållande_231 + f.Transaktionskonto_232 else 0 end),
+    FontWeight			= 'Bold',
+    TextDecoration		= 'Default',
+    BackgroundColor		= NULL,
+	LeftIndent			= '8pt',
+	LoadDate			= NULL
+FROM #REPORTTABLE f
+
+UNION ALL
+
+SELECT 
+	Period		= MAX( CAST(f.Period AS DATE) ),
+	Radkod	=	'231',
+	Radnamn	=	'2.3.1 Etablerat förhållande',
+	SaldoEUR			= sum(case when f.LCRGrupp = 'RETAIL' and f.Etableratförhållande_231 > 0  then f.Etableratförhållande_231EUR else 0 end),
+	SaldoSEK			= sum(case when f.LCRGrupp = 'RETAIL' and f.Etableratförhållande_231 > 0  then f.Etableratförhållande_231SEK else 0 end),
+	SaldoTotal			= sum(case when f.LCRGrupp = 'RETAIL' and f.Etableratförhållande_231 > 0  then f.Etableratförhållande_231 else 0 end),
+    FontWeight			= 'Default',
+    TextDecoration		= 'Default',
+    BackgroundColor		= NULL,
+	LeftIndent			= '16pt',
+	LoadDate			= NULL
+FROM #REPORTTABLE f
+
+UNION ALL
+
+SELECT 
+	Period		= MAX( CAST(f.Period AS DATE) ),
+	Radkod	=	'232',
+	Radnamn	=	'2.3.2 På transaktionskonto (Allt i Ett konto)',
+	SaldoEUR			= sum(case when f.LCRGrupp = 'RETAIL' and f.Transaktionskonto_232 > 0  then f.Transaktionskonto_232EUR else 0 end),
+	SaldoSEK			= sum(case when f.LCRGrupp = 'RETAIL' and f.Transaktionskonto_232 > 0  then f.Transaktionskonto_232SEK else 0 end),
+	SaldoTotal			= sum(case when f.LCRGrupp = 'RETAIL' and f.Transaktionskonto_232 > 0  then f.Transaktionskonto_232 else 0 end),
+    FontWeight			= 'Default',
+    TextDecoration		= 'Default',
+    BackgroundColor		= NULL,
+	LeftIndent			= '16pt',
+	LoadDate			= NULL
+FROM #REPORTTABLE f
+
+UNION ALL
+
+SELECT 
+	Period		= MAX( CAST(f.Period AS DATE) ),
+	Radkod	=	'240',
+	Radnamn	=	'2.4 Annan inlåning från allmänheten',
+	SaldoEUR			= sum(	(case when f.LCRGrupp = 'RETAIL' and (f.InsättningsGaranti_241 > 0) then f.InsättningsGaranti_241EUR else 0 end)
+							+	(case when f.LCRGrupp = 'RETAIL' and (f.totalt242 > 0) then f.totalt242EUR else 0 end)),
+	SaldoSEK			= sum(	(case when f.LCRGrupp = 'RETAIL' and (f.InsättningsGaranti_241 > 0) then f.InsättningsGaranti_241SEK else 0 end)
+							+	(case when f.LCRGrupp = 'RETAIL' and (f.totalt242 > 0) then f.totalt242SEK else 0 end)),
+	SaldoTotal			= sum(case when f.LCRGrupp = 'RETAIL' and (f.InsättningsGaranti_241 > 0 or f.totalt242 > 0) then f.InsättningsGaranti_241 + f.totalt242 else 0 end),
+    FontWeight			= 'Bold',
+    TextDecoration		= 'Default',
+    BackgroundColor		= NULL,
+	LeftIndent			= '8pt',
+	LoadDate			= NULL
+FROM #REPORTTABLE f
+
+UNION ALL
+
+SELECT 
+	Period		= MAX( CAST(f.Period AS DATE) ),	
+	Radkod	=	'241',
+	Radnamn	=	'2.4.1 Varav täckt av insättningsgaranti',
+	SaldoEUR			= sum(case when f.LCRGrupp = 'RETAIL' and f.InsättningsGaranti_241 > 0  then f.InsättningsGaranti_241EUR else 0 end),
+	SaldoSEK			= sum(case when f.LCRGrupp = 'RETAIL' and f.InsättningsGaranti_241 > 0  then f.InsättningsGaranti_241SEK else 0 end),
+	SaldoTotal			= sum(case when f.LCRGrupp = 'RETAIL' and f.InsättningsGaranti_241 > 0  then f.InsättningsGaranti_241 else 0 end),
+    FontWeight			= 'Default',
+    TextDecoration		= 'Default',
+    BackgroundColor		= NULL,
+	LeftIndent			= '16pt',
+	LoadDate			= NULL
+FROM #REPORTTABLE f
+
+UNION ALL
+
+SELECT 
+	Period		= MAX( CAST(f.Period AS DATE) ),	
+	Radkod	=	'242',
+	Radnamn	=	'2.4.2 Varav ej täckt av insättningsgaranti',
+	SaldoEUR			= sum(case when f.LCRGrupp = 'RETAIL' and f.totalt242 > 0  then f.totalt242EUR else 0 end),
+	SaldoSEK			= sum(case when f.LCRGrupp = 'RETAIL' and f.totalt242 > 0  then f.totalt242SEK else 0 end),
+	SaldoTotal			= sum(case when f.LCRGrupp = 'RETAIL' and f.totalt242 > 0  then f.totalt242 else 0 end),
+    FontWeight			= 'Default',
+    TextDecoration		= 'Default',
+    BackgroundColor		= NULL,
+	LeftIndent			= '16pt',
+	LoadDate			= NULL
+FROM #REPORTTABLE f
+
+UNION ALL
+
+SELECT 
+	Period		= MAX( CAST(f.Period AS DATE) ),
+	Radkod	=	'300',
+	Radnamn	=	'3 Totalsumma Inlåning',
+	SaldoEUR			= sum(f.SaldoEUR),
+	SaldoSEK			= sum(f.SaldoSEK),
+	SaldoTotal			= sum(f.SaldoTotal),
+    FontWeight			= 'Bold',
+    TextDecoration		= 'Default',
+    BackgroundColor		= '#f0f0f4',
+	LeftIndent			= '0pt',
+	LoadDate			= NULL
+FROM #REPORTTABLE f
+
+UNION ALL
+
+SELECT 
+	Period		= MAX( CAST(f.Period AS DATE) ),
+	Radkod	=	'400',
+	Radnamn	=	'Inlåning från allmänheten täckt av insättningsgaranti',
+	SaldoEUR			= NULL,
+	SaldoSEK			= NULL,
+	SaldoTotal			= sum(case when f.LCRGrupp = 'RETAIL' then f.SaldoTäcktAvIG else 0 end),
+    FontWeight			= 'Bold',
+    TextDecoration		= 'Default',
+    BackgroundColor		= '#f0f0f4',
+	LeftIndent			= '0pt',
+	LoadDate			= NULL
+FROM #REPORTTABLE f
+
+UNION ALL
+
+SELECT 
+	Period		= MAX( CAST(f.Period AS DATE) ),
+	Radkod	=	'410',
+	Radnamn	=	'Inlåning från allmänheten ej täckt av insättningsgaranti',
+	SaldoEUR			= NULL,
+	SaldoSEK			= NULL,
+	SaldoTotal			= sum(case when f.LCRGrupp = 'RETAIL' then f.SaldoEJTäcktAvIG else 0 end),
+    FontWeight			= 'Bold',
+    TextDecoration		= 'Default',
+    BackgroundColor		= '#f0f0f4',
+	LeftIndent			= '0pt',
+	LoadDate			= NULL
+FROM #REPORTTABLE f
+
+UNION ALL
+
+SELECT 
+	Period		= MAX( CAST(f.Period AS DATE) ),
+	Radkod	=	'420',
+	Radnamn	=	'Inlåning från Företagsinlåning täckt av insättningsgaranti',
+	SaldoEUR			= NULL,
+	SaldoSEK			= NULL,
+	SaldoTotal			= sum(case when f.LCRGrupp <> 'RETAIL' then f.SaldoTäcktAvIG else 0 end),
+    FontWeight			= 'Bold',
+    TextDecoration		= 'Default',
+    BackgroundColor		= '#f0f0f4',
+	LeftIndent			= '0pt',
+	LoadDate			= NULL
+FROM #REPORTTABLE f
+
+UNION ALL
+
+SELECT 
+	Period		= MAX( CAST(f.Period AS DATE) ),
+	Radkod	=	'430',
+	Radnamn	=	'Inlåning från Företagsinlåning ej täckt av insättningsgaranti',
+	SaldoEUR			= NULL,
+	SaldoSEK			= NULL,
+	SaldoTotal			= sum(case when f.LCRGrupp <> 'RETAIL' then f.SaldoEJTäcktAvIG else 0 end),
+    FontWeight			= 'Bold',
+    TextDecoration		= 'Default',
+    BackgroundColor		= '#f0f0f4',
+	LeftIndent			= '0pt',
+	LoadDate			= NULL
+FROM #REPORTTABLE f
+
+UNION ALL
+
+SELECT 
+	Period		= MAX( CAST(f.Period AS DATE) ),
+	Radkod	=	'500',
+	Radnamn	=	'Insättningsgaranti belopp',
+	SaldoEUR			= NULL,
+	SaldoSEK			= NULL,
+	SaldoTotal			=	MAX(F.IG_BELOPP),
+    FontWeight			= 'Default',
+    TextDecoration		= 'Default',
+    BackgroundColor		= NULL,
+	LeftIndent			= '0pt',
+	LoadDate			= NULL
+FROM #REPORTTABLE f
+
+UNION ALL
+
+SELECT 
+	Period		= MAX( CAST(f.Period AS DATE) ),
+	Radkod	=	'510',
+	Radnamn	=	'Eurokurs',
+	SaldoEUR			= NULL,
+	SaldoSEK			= NULL,
+	SaldoTotal			=	MAX(F.ValutaKurs),
+    FontWeight			= 'Default',
+    TextDecoration		= 'Default',
+    BackgroundColor		= NULL,
+	LeftIndent			= '0pt',
+	LoadDate			= NULL
+FROM #REPORTTABLE f
+
+
+SELECT @Error = @@ERROR, @RowCount = @@ROWCOUNT
+IF @Error <> 0
+BEGIN
+	SET @ErrorSave = @Error
+	GOTO ENDOFPROC
+END
+ELSE
+BEGIN
+	EXEC CDW..usp_LogTable_ins @DestinationDB, @LoadSP, 'SP', @SourceInfo, @DestinationInfo, @StartTime, @RunningSteps, @TotSteps, @Area, @Action, 'OK', @Error, @RowCount
+END
+
+-------------------------
+
+	FETCH NEXT FROM RapportDatum_Cursor INTO @RapportDatum
+
+	END
+
+	CLOSE RapportDatum_Cursor
+	DEALLOCATE RapportDatum_Cursor
+
+
+
+----------------------------------------------------------------------------------------------------------
+
+
+-- EXIT INFO
+STOP:
+	RETURN 0
+ENDOFPROC:
+	EXEC CDW..usp_LogTable_ins @DestinationDB, @LoadSP, 'SP', @SourceInfo, @DestinationInfo, @StartTime, @RunningSteps, @TotSteps, @Area, @Action, 'FAILED', @Error, @RowCount
+	RETURN @ErrorSave
+
+
+
+
+GO
+
+
