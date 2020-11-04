@@ -1,0 +1,1281 @@
+USE [MART]
+GO
+
+/****** Object:  StoredProcedure [ssrs].[usp_Ekonomi_Insättargaranti_rpt]    Script Date: 2020-11-04 16:21:52 ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+
+
+CREATE PROCEDURE [ssrs].[usp_Ekonomi_Insättargaranti_rpt]
+	@Period AS INT = NULL,
+	@GarantiBelopp AS DECIMAL (18,0) = NULL,
+	@Eurokurs AS DECIMAL (18,5) = NULL
+
+-- exec [ssrs].[usp_Ekonomi_Insättargaranti_rpt_20190812] '201906','950000','10.5660400'
+
+/***************************************************************************************************************
+Beskrivning : SP för rapporten Insättargaranti, ersätter BO rapport med samma namn
+Kommentar   : Kan stämmas av med inlåningen om man exkluderar IPS och manuellt inlagda diffar
+
+
+Exempel     : EXEC [ssrs].[usp_Ekonomi_Insättargaranti_rpt] 201604, 1000000, 9.18852
+****************************************************************************************************************
+Skapad av   : Stefan Granath
+Datum       : 2010-12-16
+****************************************************************************************************************
+Reviderad   : Stefan Granath
+Datum       : 2011-10-25
+Kommentar   : Lagt in beskrivning för Skandiakonto
+****************************************************************************************************************
+Reviderad   : Stefan Granath
+Datum       : 2012-02-07
+Kommentar   : Lagt in filter på vissa depåtyper fr.o.m period 2011-12
+****************************************************************************************************************
+Reviderad   : Stefan Granath
+Datum       : 2014-01-28
+Kommentar   : Ändrat till DimVärdepapper_Månad
+****************************************************************************************************************
+Reviderad   : Stefan Granath
+Datum       : 2016-05-09
+Kommentar   : Exkluderat flera VP avstämningskategorier enl CHG0056175: IRI, ROI, SIC, SIP
+			: Samt ändrat beskrivning av AiE konto och Depåinlåning.
+			: Lagt in detaljer för depåtyper med summafilter 3
+****************************************************************************************************************
+Reviderad   : Robert Juhlin
+Datum       : 2016-11-23
+Kommentar   : Lagt till filter för sektorkoder CHG0058234
+****************************************************************************************************************
+Reviderad   : Robert Juhlin
+Datum       : 2019-03-28
+Kommentar   : Lagt till Upplupen_Ränta_ACK
+****************************************************************************************************************
+Reviderad   : Robert Juhlin
+Datum       : 2019-08-13
+Kommentar   : Lagt till Upplupen_Ränta_eff_ACK + massa ändringar som beräknar olika saldon som tar hänsyn till 
+			: upplupen ränta
+****************************************************************************************************************
+Reviderad   : Robert Juhlin
+Datum       : 2019-08-19
+Kommentar   : Efter diskussion med Kerstin, CIM ska vara med
+****************************************************************************************************************
+Reviderad   : Fredrik Olander
+Datum       : 2020-10-20
+Kommentar   : Uppdaterat Kontoinformation för 2021-01 och framåt. Original SP'n finns i "ssrs.usp_Ekonomi_Insättargaranti_rpt_20201020"
+****************************************************************************************************************
+Inparametrar: @Eurokurs hämtas i SSRS från en annan SP: ssrs.Usp_Get_EuroKurs
+Returvarde  :
+Ovriga Utparametrar:
+***************************************************************************************************************/
+
+AS
+
+/*
+DECLARE @Period AS INT
+DECLARE @GarantiBelopp AS DECIMAL (18,0)
+DECLARE @Eurokurs AS DECIMAL (18,5)
+
+SET @Period = 201906
+SET @GarantiBelopp = 950000
+SET @Eurokurs = 10.5660400
+
+*/
+
+----------	default värden parametrar
+
+	DECLARE @Date AS DATETIME
+
+	SET @Period				= CASE 
+								WHEN @Period IS NULL THEN CONVERT(INT,CONVERT(VARCHAR(6),DATEADD(M,-1,GETDATE()),112))
+								ELSE @Period END
+								
+	SET @Date				= DATEADD(D,-1,DATEADD(M,1,CONVERT(VARCHAR(6),@Period) + '01'))
+
+	SET @GarantiBelopp		= CASE WHEN @GarantiBelopp IS NULL THEN 512000 ELSE @GarantiBelopp END
+
+	DECLARE @PERIODFBM DATE
+	SET @PERIODFBM = (select max(period) from v_DimPeriod where ÅrMånad = @Period)
+
+--------- Skapar temporär tabell med periodens upplupna ränta ACK
+
+	BEGIN TRY
+		DROP TABLE #FACTBANKMÅNAD
+	END TRY
+	BEGIN CATCH
+	END CATCH
+
+	SELECT 
+		KontoNummer			= RIGHT(D.KontoNummer,11),
+		Upplupen_Ränta_ACK	= F.Upplupen_Ränta_ACK
+	INTO #FACTBANKMÅNAD
+	FROM FactBank_Månad F
+		INNER JOIN v_DimKonto D
+			ON F.KontoID = D.KontoID
+	WHERE F.Period = @PERIODFBM
+		AND D.DatumKontoSlut > @PERIODFBM
+
+
+----------	RAPPORTFRÅGA PERIOD 2021-01 TILLSVIDARE
+IF @Period >= 202101
+BEGIN
+
+	BEGIN TRY
+	DROP TABLE #REPORTTABLE
+	END TRY
+	BEGIN CATCH 
+	END CATCH
+
+	SELECT 
+		Period			= @Period,
+		Sort			= CASE 
+							WHEN Radbeskrivning LIKE 'Kunder med saldo%' THEN 1
+							WHEN Radbeskrivning = 'Eurokonto (EUR)' THEN 2
+							WHEN Radbeskrivning = 'Eurokonto (SEK)' THEN 3
+							WHEN Radbeskrivning = 'Allt i Ett-konto' THEN 4
+							WHEN Radbeskrivning = 'Fasträntekonto' THEN 5
+							WHEN Radbeskrivning = 'Likviditetskonto' THEN 6
+							WHEN Radbeskrivning = 'Sparkonto' THEN 7
+							WHEN Radbeskrivning = 'Depåinlåning' THEN 8
+							WHEN Radbeskrivning = 'Betal och Kreditkort' THEN 9 
+							WHEN Radbeskrivning = 'Skandiakonto' THEN 10 END,
+		Radbeskrivning,
+		Radbeskrivning2	= CASE
+							WHEN Radbeskrivning = 'Eurokonto (SEK)' THEN 'Konto 22116, produkt 51'
+--							WHEN Radbeskrivning = 'Allt i Ett-konto' THEN 'Konto 221120, produkt 51-56, 91-92, 10-102'
+							-- ändrat till nedan 2016-05-09 enl CHG0056175 /SG
+							WHEN Radbeskrivning = 'Allt i Ett-konto' THEN 'Konto 22112, produkt 51-58'							
+							WHEN Radbeskrivning = 'Fasträntekonto' THEN 'Konto 22151'
+							WHEN Radbeskrivning = 'Likviditetskonto' THEN 'Konto 22112, produkt 71-79'
+							WHEN Radbeskrivning = 'Sparkonto' THEN 'Konto 22113'
+--							WHEN Radbeskrivning = 'Depåinlåning' THEN 'Konto 223202'
+--							WHEN Radbeskrivning = 'Depåinlåning' THEN 'Konto 223202 exkl Depåförsäkringar'
+							-- ändrat till nedan 2016-05-09 enl CHG0056175 /SG
+							WHEN Radbeskrivning = 'Depåinlåning' THEN 'Konto 22323 exkl Depåförsäkringar samt 22321 RDK'
+							WHEN Radbeskrivning = 'Betal och Kreditkort' THEN 'Konto 22141' 
+							WHEN Radbeskrivning = 'Skandiakonto' THEN 'Konto 22111' ELSE '' END,
+		Saldo,
+		SALDO_SEKTORKOD,
+
+		SALDO_SEKTORKOD_utan,
+		
+		SALDO_SEKTORKOD_FILTER,
+		AntalKunder,
+		AntalKunder_SEKTORKOD,
+		AntalKunder_SEKTORKOD_FILTER,
+		GarantiBelopp	= @Garantibelopp,
+		Eurokurs		= @Eurokurs,
+		SummaFilter,
+		Upplupen_Ränta_ACK,
+
+		Upplupen_Ränta_eff_ACK,
+
+		Upplupen_Ränta_ACK_SEKTORKOD_FILTER
+		
+	INTO #REPORTTABLE
+	FROM (
+		--SALDO PER PERSONNUMMER STÖRRE ÄN GARANTIBELOPP
+		SELECT	
+			Radbeskrivning					= 'Kunder med saldo >= ' + CONVERT(VARCHAR(12),@GarantiBelopp),
+			Saldo							= SUM(Saldo),
+			SALDO_SEKTORKOD					= SUM(SALDO_SEKTORKOD),
+
+			SALDO_SEKTORKOD_utan			= SUM(SALDO_SEKTORKOD_utan),
+
+			SALDO_SEKTORKOD_FILTER			= SUM(SALDO_SEKTORKOD_FILTER),
+			AntalKunder						= COUNT(DISTINCT Personnummer),
+			AntalKunder_SEKTORKOD			= COUNT(DISTINCT Personnummer1),
+			AntalKunder_SEKTORKOD_FILTER	= COUNT(DISTINCT Personnummer2),
+			SummaFilter						= 0,
+			Upplupen_Ränta_ACK						= 0,		--sum(Upplupen_Ränta_ACK) Vi vet inte vilket del som är upplupen ränta och vad som är saldo /Julle
+
+			Upplupen_Ränta_eff_ACK					= 0,
+
+			Upplupen_Ränta_ACK_SEKTORKOD_FILTER		= 0
+		FROM (
+				SELECT
+					Personnummer				= CASE WHEN K.Personnummer = '165164018276' THEN '165020173083' ELSE K.Personnummer END,
+					Personnummer1				= CASE	WHEN K.Personnummer = '165164018276' AND CIG.KOD IS NULL THEN '165020173083' 
+														WHEN CIG.KOD IS NULL THEN K.Personnummer ELSE NULL END,
+					
+					Personnummer2				= CASE	WHEN K.Personnummer = '165164018276' AND CIG.KOD IS NOT NULL THEN '165020173083' 
+														WHEN CIG.KOD IS NOT NULL THEN K.Personnummer ELSE NULL END,
+--					Saldo						= SUM(F.Inlåning + ISNULL(FBM.Upplupen_Ränta_ACK,0)),	-- OBS! i inlåning är casen gjord på fasträntekonto,
+					Saldo						= SUM( CASE		WHEN P.Produktbeskrivning = 'Fasträntekonto' then F.Inlåning
+																ELSE F.Inlåning + ISNULL(FBM.Upplupen_Ränta_ACK,0) END),
+--					SALDO_SEKTORKOD				= SUM (	CASE WHEN CIG.KOD IS NULL THEN F.Inlåning + ISNULL(FBM.Upplupen_Ränta_ACK,0) ELSE 0 END ),
+					SALDO_SEKTORKOD				= SUM (	CASE	WHEN CIG.KOD IS NULL and P.Produktbeskrivning = 'Fasträntekonto' then F.Inlåning 
+																WHEN CIG.KOD IS NULL and P.Produktbeskrivning <> 'Fasträntekonto' then F.SaldoFörePeriod + ISNULL(FBM.Upplupen_Ränta_ACK,0) 
+														ELSE 0 END ),
+
+					SALDO_SEKTORKOD_utan		= SUM (	CASE WHEN CIG.KOD IS NULL THEN f.SaldoFörePeriod ELSE 0 END ),
+
+--					SALDO_SEKTORKOD_FILTER		= SUM ( CASE WHEN CIG.KOD IS NOT NULL THEN F.Inlåning + ISNULL(FBM.Upplupen_Ränta_ACK,0) ELSE 0 END ),
+					SALDO_SEKTORKOD_FILTER		= SUM (	CASE	WHEN CIG.KOD IS NULL and P.Produktbeskrivning = 'Fasträntekonto' then F.Inlåning 
+																WHEN CIG.KOD IS NULL and P.Produktbeskrivning <> 'Fasträntekonto' then F.SaldoFörePeriod + ISNULL(FBM.Upplupen_Ränta_ACK,0) 
+														ELSE 0 END ),
+
+--					Upplupen_Ränta_ACK			= SUM(ISNULL(FBM.Upplupen_Ränta_ACK,0)),
+					Upplupen_Ränta_ACK			= SUM( case when p.Produktbeskrivning <> 'Fasträntekonto' then ISNULL(FBM.Upplupen_Ränta_ACK,0) else 0 end),
+
+					Upplupen_Ränta_eff_ACK		= SUM( case when p.Produktbeskrivning = 'Fasträntekonto' then f.Inlåning - f.SaldoFörePeriod else 0  end),	
+
+					Upplupen_Ränta_ACK_SEKTORKOD_FILTER		= SUM ( CASE WHEN CIG.KOD IS NOT NULL THEN ISNULL(FBM.Upplupen_Ränta_ACK,0) ELSE 0 END )							 
+
+				FROM v_FactInlåning F
+					INNER JOIN v_DimKund K
+						ON F.KundID = K.KundID
+					INNER JOIN v_DimEkonomiProdukt P
+						ON F.EkonomiProduktID = P.EkonomiProduktID
+					LEFT JOIN v_DimVärdepapperkonto_Månad K2
+						ON F.Kontonummer = K2.Kontonummer AND F.Källsystem = 'Värdepapper'
+					LEFT JOIN CtrlInsättningsGaranti CIG
+						ON K.Sektorkod = CIG.KOD
+					LEFT JOIN #FACTBANKMÅNAD FBM
+						ON F.Kontonummer = FBM.KontoNummer						 
+
+				WHERE 
+					F.Period = @Period AND
+					P.Produktbeskrivning NOT IN ('IPS') AND
+					F.Diff = 0	AND	-- exkluderar diffar
+					1 = CASE 
+						WHEN F.Källsystem <> 'Värdepapper' THEN 1
+						WHEN F.Källsystem = 'Värdepapper' AND K2.DepåTyp NOT IN (	'LII', 'LIA', 'LIC', 'PIA', 'PIC', 'PII', 'PTA', 
+																					'PTC', 'TIA', 'TIC', 'TPA', 'TPAC'
+																					-- 2016-05-09 CHG0056175 /SG 
+																					,'IRI', 'ROI', 'SIC', 'SIP'
+																					)
+						THEN 1 ELSE NULL END
+				GROUP BY 
+					CASE	WHEN K.Personnummer = '165164018276' THEN '165020173083' ELSE K.Personnummer END,
+					CASE	WHEN K.Personnummer = '165164018276' AND CIG.KOD IS NULL THEN '165020173083' 
+							WHEN CIG.KOD IS NULL THEN K.Personnummer ELSE NULL END,
+					CASE	WHEN K.Personnummer = '165164018276' AND CIG.KOD IS NOT NULL THEN '165020173083' 
+							WHEN CIG.KOD IS NOT NULL THEN K.Personnummer ELSE NULL END
+				--HAVING SUM(F.SaldoFörePeriod + ISNULL(FBM.Upplupen_Ränta_ACK,0)) >= @GarantiBelopp
+				HAVING SUM(	case when P.Produktbeskrivning = 'Fasträntekonto' then f.Inlåning else 
+								F.SaldoFörePeriod + ISNULL(FBM.Upplupen_Ränta_ACK,0) end) >= @GarantiBelopp
+			) Saldo
+
+		UNION ALL
+	--	SALDO PER PRODUKT
+	--	LAGT TILL FILTER PÅ VISSA DEPÅTYPER //SG
+		SELECT 
+			Radbeskrivning					= CASE WHEN P.Produktbeskrivning = 'Eurokonto' THEN P.Produktbeskrivning + ' (SEK)' ELSE P.Produktbeskrivning END,
+--			Saldo							= SUM(F.Inlåning + ISNULL(FBM.Upplupen_Ränta_ACK,0)),
+			Saldo							= SUM( CASE		WHEN P.Produktbeskrivning = 'Fasträntekonto' then F.Inlåning
+															ELSE F.Inlåning + ISNULL(FBM.Upplupen_Ränta_ACK,0) END),
+			SALDO_SEKTORKOD					= SUM (	CASE	WHEN CIG.KOD IS NULL and P.Produktbeskrivning = 'Fasträntekonto' then F.Inlåning 
+															WHEN CIG.KOD IS NULL and P.Produktbeskrivning <> 'Fasträntekonto' then F.SaldoFörePeriod + ISNULL(FBM.Upplupen_Ränta_ACK,0) 
+													ELSE 0 END ),
+
+			SALDO_SEKTORKOD_utan			= SUM (	CASE WHEN CIG.KOD IS NULL THEN F.SaldoFörePeriod ELSE 0 END ),
+
+			SALDO_SEKTORKOD_FILTER			= SUM ( CASE WHEN CIG.KOD IS NOT NULL THEN f.SaldoFörePeriod ELSE 0 END ),
+			 
+			AntalKunder						= COUNT(DISTINCT K.Personnummer),
+			AntalKunder_SEKTORKOD			= COUNT(DISTINCT CASE WHEN CIG.KOD IS NULL THEN K.Personnummer END),
+			AntalKunder_SEKTORKOD_FILTER	= COUNT(DISTINCT CASE WHEN CIG.KOD IS NOT NULL THEN K.Personnummer END),
+			SummaFilter						= 1,
+--			Upplupen_Ränta_ACK				= SUM(ISNULL(FBM.Upplupen_Ränta_ACK,0)),
+			Upplupen_Ränta_ACK			= SUM( case when p.Produktbeskrivning <> 'Fasträntekonto' then ISNULL(FBM.Upplupen_Ränta_ACK,0) else 0  end),
+
+			Upplupen_Ränta_eff_ACK			= SUM( case when p.Produktbeskrivning = 'Fasträntekonto' then f.Inlåning - f.SaldoFörePeriod else 0  end),	
+
+			Upplupen_Ränta_ACK_SEKTORKOD_FILTER		= SUM ( CASE WHEN CIG.KOD IS NOT NULL THEN ISNULL(FBM.Upplupen_Ränta_ACK,0) ELSE 0 END )					
+
+		FROM v_FactInlåning F
+			INNER JOIN v_DimKund K
+				ON F.KundID = K.KundID
+			INNER JOIN v_DimEkonomiProdukt P
+				ON F.EkonomiProduktID = P.EkonomiProduktID
+			LEFT JOIN v_DimVärdepapperkonto_Månad K2
+				ON F.Kontonummer = K2.Kontonummer AND F.Källsystem = 'Värdepapper'
+			LEFT JOIN CtrlInsättningsGaranti CIG
+				ON K.Sektorkod = CIG.KOD
+			LEFT JOIN #FACTBANKMÅNAD FBM
+				ON F.Kontonummer = FBM.KontoNummer	
+				 
+		WHERE 
+			F.Period = @Period AND
+			P.Produktbeskrivning NOT IN ('IPS') AND
+			F.Diff = 0	AND	-- exkluderar diffar
+			1 = CASE 
+				WHEN F.Källsystem <> 'Värdepapper' THEN 1
+				WHEN F.Källsystem = 'Värdepapper' AND K2.DepåTyp NOT IN (	'LII', 'LIA', 'LIC', 'PIA', 'PIC', 'PII', 'PTA', 
+																			'PTC', 'TIA', 'TIC', 'TPA', 'TPAC'
+																			-- 2016-05-09 CHG0056175 /SG 
+																			,'IRI', 'ROI', 'SIC', 'SIP'
+																			)
+				THEN 1 ELSE NULL END
+				
+		GROUP BY 
+			P.Produktbeskrivning
+		UNION ALL
+
+	--	EUROKONTO I EURO
+		SELECT 
+			Radbeskrivning					= P.Produktbeskrivning + ' (EUR)',
+			Saldo							= SUM(CONVERT(MONEY,F.Inlåning/@Eurokurs) + ISNULL(FBM.Upplupen_Ränta_ACK,0)),
+
+--			SALDO_SEKTORKOD					= SUM (	CASE WHEN CIG.KOD IS NULL THEN CONVERT(MONEY,F.Inlåning/@Eurokurs) + ISNULL(FBM.Upplupen_Ränta_ACK,0) ELSE 0 END ),
+			SALDO_SEKTORKOD					= SUM (	CASE WHEN CIG.KOD IS NULL THEN CONVERT(MONEY,F.SaldoFörePeriod/@Eurokurs) + ISNULL(FBM.Upplupen_Ränta_ACK,0) ELSE 0 END ),
+
+			SALDO_SEKTORKOD_utan			= SUM (	CASE WHEN CIG.KOD IS NULL THEN CONVERT(MONEY,F.SaldoFörePeriod/@Eurokurs) ELSE 0 END ),
+
+			SALDO_SEKTORKOD_FILTER			= SUM ( CASE WHEN CIG.KOD IS NOT NULL THEN CONVERT(MONEY,F.Inlåning/@Eurokurs) + ISNULL(FBM.Upplupen_Ränta_ACK,0) ELSE 0 END ), 
+			AntalKunder						= COUNT(DISTINCT K.Personnummer),
+			AntalKunder_SEKTORKOD			= COUNT(DISTINCT CASE WHEN CIG.KOD IS NULL THEN K.Personnummer END),
+			AntalKunder_SEKTORKOD_FILTER	= COUNT(DISTINCT CASE WHEN CIG.KOD IS NOT NULL THEN K.Personnummer END),
+			SummaFilter						= 0,
+--			Upplupen_Ränta_ACK				= SUM(ISNULL(FBM.Upplupen_Ränta_ACK,0)),
+			Upplupen_Ränta_ACK			= SUM( case when p.Produktbeskrivning <> 'Fasträntekonto' then ISNULL(FBM.Upplupen_Ränta_ACK,0) else 0  end),				
+
+			Upplupen_Ränta_eff_ACK			= SUM( case when p.Produktbeskrivning = 'Fasträntekonto' then f.Inlåning - f.SaldoFörePeriod else 0  end),	
+
+			Upplupen_Ränta_ACK_SEKTORKOD_FILTER		= SUM ( CASE WHEN CIG.KOD IS NOT NULL THEN ISNULL(FBM.Upplupen_Ränta_ACK,0) ELSE 0 END )	
+
+		FROM v_FactInlåning F
+			INNER JOIN v_DimKund K
+				ON F.KundID = K.KundID
+			INNER JOIN v_DimEkonomiProdukt P
+				ON F.EkonomiProduktID = P.EkonomiProduktID
+			LEFT JOIN CtrlInsättningsGaranti CIG
+				ON K.Sektorkod = CIG.KOD
+			LEFT JOIN #FACTBANKMÅNAD FBM
+				ON F.Kontonummer = FBM.KontoNummer
+								 
+		WHERE 
+			F.Period = @Period AND
+			P.Produktbeskrivning = 'Eurokonto' AND
+			F.Diff = 0		-- exkluderar diffar
+		GROUP BY 
+			P.Produktbeskrivning
+	) F
+	
+	ORDER BY 
+		CASE 
+			WHEN Radbeskrivning LIKE 'Kunder med saldo%' THEN 1
+			WHEN Radbeskrivning = 'Eurokonto (EUR)' THEN 2
+			WHEN Radbeskrivning = 'Eurokonto (SEK)' THEN 3
+			WHEN Radbeskrivning = 'Allt i Ett-konto' THEN 4
+			WHEN Radbeskrivning = 'Fasträntekonto' THEN 5
+			WHEN Radbeskrivning = 'Likviditetskonto' THEN 6
+			WHEN Radbeskrivning = 'Sparkonto' THEN 7
+			WHEN Radbeskrivning = 'Depåinlåning' THEN 8
+			WHEN Radbeskrivning = 'Betal och Kreditkort' THEN 9 
+			WHEN Radbeskrivning = 'Skandiakonto' THEN 10 END
+
+
+-------		INSERT VP DETALJER
+
+
+	INSERT INTO #REPORTTABLE
+	(	Period,
+		Sort,
+		Radbeskrivning,
+		Radbeskrivning2,
+		Saldo,
+		SALDO_SEKTORKOD,
+		SALDO_SEKTORKOD_utan,
+		SALDO_SEKTORKOD_FILTER,
+		AntalKunder,
+		AntalKunder_SEKTORKOD,
+		AntalKunder_SEKTORKOD_FILTER,
+		GarantiBelopp,
+		Eurokurs,
+		SummaFilter,
+		Upplupen_Ränta_ACK,
+		Upplupen_Ränta_eff_ACK,
+		Upplupen_Ränta_ACK_SEKTORKOD_FILTER
+	)
+	SELECT
+		
+		Period							= P.ÅrMånad,
+		Sort							= 0,
+		Radbeskrivning					= KO.DepåTyp,
+		Radbeskrivning2					= '',
+		Saldo							= SUM(F.LikvidSaldo),
+		SALDO_SEKTORKOD					= SUM (	CASE WHEN CIG.KOD IS NULL THEN F.LikvidSaldo ELSE 0 END ),
+
+		SALDO_SEKTORKOD_utan			= SUM (	CASE WHEN CIG.KOD IS NULL THEN F.LikvidSaldo ELSE 0 END ),
+
+		SALDO_SEKTORKOD_FILTER			= SUM (	CASE WHEN CIG.KOD IS NOT NULL THEN F.LikvidSaldo ELSE 0 END ),
+		AntalKunder						= COUNT(DISTINCT K.Personnummer),
+		AntalKunder_SEKTORKOD			= COUNT(DISTINCT CASE WHEN CIG.KOD IS NULL THEN K.Personnummer END),
+		AntalKunder_SEKTORKOD_FILTER	= COUNT(DISTINCT CASE WHEN CIG.KOD IS NOT NULL THEN K.Personnummer END),
+		GarantiBelopp					= @Garantibelopp,
+		Eurokurs						= @Eurokurs,
+		SummaFilter						= 3,						-- DETALJER VP
+		Upplupen_Ränta_ACK						= 0,
+
+		Upplupen_Ränta_eff_ACK			= 0,
+
+		Upplupen_Ränta_ACK_SEKTORKOD_FILTER		= 0
+
+	FROM v_FactVärdepapper_Månad F
+		INNER JOIN v_DimPeriod P
+			ON F.Period = P.Period
+		INNER JOIN v_DimKund K
+			ON F.KundID = K.KundID
+		INNER JOIN v_DimVärdepapperKonto_Månad KO
+			ON F.VärdepapperKontoID = KO.VärdepapperKontoID
+		LEFT JOIN CtrlInsättningsGaranti CIG
+			ON K.Sektorkod = CIG.KOD 
+	WHERE 
+		P.ÅrMånad = @Period AND
+		F.LikvidSaldo > 0 AND
+		--MFI FILTER
+		KO.Depåtyp IN (SELECT DISTINCT DepåTyp FROM v_DimDepåtyp_Inkludera) AND
+		--INSÄTTNINGSGARANTI FILTER
+		KO.DepåTyp NOT IN (	'IPS DEPÅER','LII', 'LIA', 'LIC', 'PIA', 'PIC', 'PII', 'PTA', 
+									'PTC', 'TIA', 'TIC', 'TPA', 'TPAC'
+									-- 2016-05-09 CHG0056175 /SG 
+									,'IRI', 'ROI', 'SIC', 'SIP'
+									)
+			
+	GROUP BY 
+		P.ÅrMånad,
+		KO.DepåTyp
+
+-------	RAPPORT SELECT
+
+	SELECT 
+		Period,
+		Sort,
+		Radbeskrivning,
+		Radbeskrivning2,
+		Saldo_gamla_rapporten					= Saldo,
+		Upplupen_Ränta_ACK						= Upplupen_Ränta_ACK,
+
+		Upplupen_Ränta_eff_ACK					= Upplupen_Ränta_eff_ACK,
+
+		Upplupen_Ränta_ACK_SEKTORKOD_FILTER		= Upplupen_Ränta_ACK_SEKTORKOD_FILTER,
+		AntalKunder_gamla_rapporten				= AntalKunder,
+		GarantiBelopp,
+		Eurokurs,
+		SummaFilter,
+		Saldo_på_dom_som_omfattas				= SALDO_SEKTORKOD,
+
+		SALDO_SEKTORKOD_utan					= SALDO_SEKTORKOD_utan,
+
+		Saldo_på_dom_som_inte_omfattas			= SALDO_SEKTORKOD_FILTER,
+		--SALDO_DIFF = Saldo - SALDO_SEKTORKOD - SALDO_SEKTORKOD_FILTER,
+		AntalKunder_SEKTORKOD,
+		AntalKunder_SEKTORKOD_FILTER,
+		--ANTALKUNDER_DIFF = AntalKunder - AntalKunder_SEKTORKOD - AntalKunder_SEKTORKOD_FILTER,
+		Garanterat_saldo_gamla_rapporten		= AntalKunder * @GarantiBelopp,
+		Garanterat_saldo_på_dom_som_omfattas	= AntalKunder_SEKTORKOD * @GarantiBelopp
+
+	FROM #REPORTTABLE
+	ORDER BY 
+		CASE 
+			WHEN Radbeskrivning LIKE 'Kunder med saldo%' THEN 1
+			WHEN Radbeskrivning = 'Eurokonto (EUR)' THEN 2
+			WHEN Radbeskrivning = 'Eurokonto (SEK)' THEN 3
+			WHEN Radbeskrivning = 'Allt i Ett-konto' THEN 4
+			WHEN Radbeskrivning = 'Fasträntekonto' THEN 5
+			WHEN Radbeskrivning = 'Likviditetskonto' THEN 6
+			WHEN Radbeskrivning = 'Sparkonto' THEN 7
+			WHEN Radbeskrivning = 'Depåinlåning' THEN 8
+			WHEN Radbeskrivning = 'Betal och Kreditkort' THEN 9 
+			WHEN Radbeskrivning = 'Skandiakonto' THEN 10 END
+	
+END
+
+
+ELSE
+
+----------	RAPPORTFRÅGA PERIOD 2011-12 TILL 2020-12
+BEGIN
+
+	BEGIN TRY
+	DROP TABLE #REPORTTABLE2
+	END TRY
+	BEGIN CATCH 
+	END CATCH
+
+	SELECT 
+		Period			= @Period,
+		Sort			= CASE 
+							WHEN Radbeskrivning LIKE 'Kunder med saldo%' THEN 1
+							WHEN Radbeskrivning = 'Eurokonto (EUR)' THEN 2
+							WHEN Radbeskrivning = 'Eurokonto (SEK)' THEN 3
+							WHEN Radbeskrivning = 'Allt i Ett-konto' THEN 4
+							WHEN Radbeskrivning = 'Fasträntekonto' THEN 5
+							WHEN Radbeskrivning = 'Likviditetskonto' THEN 6
+							WHEN Radbeskrivning = 'Sparkonto' THEN 7
+							WHEN Radbeskrivning = 'Depåinlåning' THEN 8
+							WHEN Radbeskrivning = 'Betal och Kreditkort' THEN 9 
+							WHEN Radbeskrivning = 'Skandiakonto' THEN 10 END,
+		Radbeskrivning,
+		Radbeskrivning2	= CASE
+							WHEN Radbeskrivning = 'Eurokonto (SEK)' THEN 'Konto 221121, produkt 51'
+--							WHEN Radbeskrivning = 'Allt i Ett-konto' THEN 'Konto 221120, produkt 51-56, 91-92, 10-102'
+							-- ändrat till nedan 2016-05-09 enl CHG0056175 /SG
+							WHEN Radbeskrivning = 'Allt i Ett-konto' THEN 'Konto 221120, produkt 51-58'							
+							WHEN Radbeskrivning = 'Fasträntekonto' THEN 'Konto 251210'
+							WHEN Radbeskrivning = 'Likviditetskonto' THEN 'Konto 221120, produkt 71-79'
+							WHEN Radbeskrivning = 'Sparkonto' THEN 'Konto 221130'
+--							WHEN Radbeskrivning = 'Depåinlåning' THEN 'Konto 223202'
+--							WHEN Radbeskrivning = 'Depåinlåning' THEN 'Konto 223202 exkl Depåförsäkringar'
+							-- ändrat till nedan 2016-05-09 enl CHG0056175 /SG
+							WHEN Radbeskrivning = 'Depåinlåning' THEN 'Konto 223202 exkl Depåförsäkringar samt 223210 RDK'
+							WHEN Radbeskrivning = 'Betal och Kreditkort' THEN 'Konto 221410' 
+							WHEN Radbeskrivning = 'Skandiakonto' THEN 'Konto 221110' ELSE '' END,
+		Saldo,
+		SALDO_SEKTORKOD,
+
+		SALDO_SEKTORKOD_utan,
+		
+		SALDO_SEKTORKOD_FILTER,
+		AntalKunder,
+		AntalKunder_SEKTORKOD,
+		AntalKunder_SEKTORKOD_FILTER,
+		GarantiBelopp	= @Garantibelopp,
+		Eurokurs		= @Eurokurs,
+		SummaFilter,
+		Upplupen_Ränta_ACK,
+
+		Upplupen_Ränta_eff_ACK,
+
+		Upplupen_Ränta_ACK_SEKTORKOD_FILTER
+		
+	INTO #REPORTTABLE2
+	FROM (
+		--SALDO PER PERSONNUMMER STÖRRE ÄN GARANTIBELOPP
+		SELECT	
+			Radbeskrivning					= 'Kunder med saldo >= ' + CONVERT(VARCHAR(12),@GarantiBelopp),
+			Saldo							= SUM(Saldo),
+			SALDO_SEKTORKOD					= SUM(SALDO_SEKTORKOD),
+
+			SALDO_SEKTORKOD_utan			= SUM(SALDO_SEKTORKOD_utan),
+
+			SALDO_SEKTORKOD_FILTER			= SUM(SALDO_SEKTORKOD_FILTER),
+			AntalKunder						= COUNT(DISTINCT Personnummer),
+			AntalKunder_SEKTORKOD			= COUNT(DISTINCT Personnummer1),
+			AntalKunder_SEKTORKOD_FILTER	= COUNT(DISTINCT Personnummer2),
+			SummaFilter						= 0,
+			Upplupen_Ränta_ACK						= 0,		--sum(Upplupen_Ränta_ACK) Vi vet inte vilket del som är upplupen ränta och vad som är saldo /Julle
+
+			Upplupen_Ränta_eff_ACK					= 0,
+
+			Upplupen_Ränta_ACK_SEKTORKOD_FILTER		= 0
+		FROM (
+				SELECT
+					Personnummer				= CASE WHEN K.Personnummer = '165164018276' THEN '165020173083' ELSE K.Personnummer END,
+					Personnummer1				= CASE	WHEN K.Personnummer = '165164018276' AND CIG.KOD IS NULL THEN '165020173083' 
+														WHEN CIG.KOD IS NULL THEN K.Personnummer ELSE NULL END,
+					
+					Personnummer2				= CASE	WHEN K.Personnummer = '165164018276' AND CIG.KOD IS NOT NULL THEN '165020173083' 
+														WHEN CIG.KOD IS NOT NULL THEN K.Personnummer ELSE NULL END,
+--					Saldo						= SUM(F.Inlåning + ISNULL(FBM.Upplupen_Ränta_ACK,0)),	-- OBS! i inlåning är casen gjord på fasträntekonto,
+					Saldo						= SUM( CASE		WHEN P.Produktbeskrivning = 'Fasträntekonto' then F.Inlåning
+																ELSE F.Inlåning + ISNULL(FBM.Upplupen_Ränta_ACK,0) END),
+--					SALDO_SEKTORKOD				= SUM (	CASE WHEN CIG.KOD IS NULL THEN F.Inlåning + ISNULL(FBM.Upplupen_Ränta_ACK,0) ELSE 0 END ),
+					SALDO_SEKTORKOD				= SUM (	CASE	WHEN CIG.KOD IS NULL and P.Produktbeskrivning = 'Fasträntekonto' then F.Inlåning 
+																WHEN CIG.KOD IS NULL and P.Produktbeskrivning <> 'Fasträntekonto' then F.SaldoFörePeriod + ISNULL(FBM.Upplupen_Ränta_ACK,0) 
+														ELSE 0 END ),
+
+					SALDO_SEKTORKOD_utan		= SUM (	CASE WHEN CIG.KOD IS NULL THEN f.SaldoFörePeriod ELSE 0 END ),
+
+--					SALDO_SEKTORKOD_FILTER		= SUM ( CASE WHEN CIG.KOD IS NOT NULL THEN F.Inlåning + ISNULL(FBM.Upplupen_Ränta_ACK,0) ELSE 0 END ),
+					SALDO_SEKTORKOD_FILTER		= SUM (	CASE	WHEN CIG.KOD IS NULL and P.Produktbeskrivning = 'Fasträntekonto' then F.Inlåning 
+																WHEN CIG.KOD IS NULL and P.Produktbeskrivning <> 'Fasträntekonto' then F.SaldoFörePeriod + ISNULL(FBM.Upplupen_Ränta_ACK,0) 
+														ELSE 0 END ),
+
+--					Upplupen_Ränta_ACK			= SUM(ISNULL(FBM.Upplupen_Ränta_ACK,0)),
+					Upplupen_Ränta_ACK			= SUM( case when p.Produktbeskrivning <> 'Fasträntekonto' then ISNULL(FBM.Upplupen_Ränta_ACK,0) else 0 end),
+
+					Upplupen_Ränta_eff_ACK		= SUM( case when p.Produktbeskrivning = 'Fasträntekonto' then f.Inlåning - f.SaldoFörePeriod else 0  end),	
+
+					Upplupen_Ränta_ACK_SEKTORKOD_FILTER		= SUM ( CASE WHEN CIG.KOD IS NOT NULL THEN ISNULL(FBM.Upplupen_Ränta_ACK,0) ELSE 0 END )							 
+
+				FROM v_FactInlåning F
+					INNER JOIN v_DimKund K
+						ON F.KundID = K.KundID
+					INNER JOIN v_DimEkonomiProdukt P
+						ON F.EkonomiProduktID = P.EkonomiProduktID
+					LEFT JOIN v_DimVärdepapperkonto_Månad K2
+						ON F.Kontonummer = K2.Kontonummer AND F.Källsystem = 'Värdepapper'
+					LEFT JOIN CtrlInsättningsGaranti CIG
+						ON K.Sektorkod = CIG.KOD
+					LEFT JOIN #FACTBANKMÅNAD FBM
+						ON F.Kontonummer = FBM.KontoNummer						 
+
+				WHERE 
+					F.Period = @Period AND
+					P.Produktbeskrivning NOT IN ('IPS') AND
+					F.Diff = 0	AND	-- exkluderar diffar
+					1 = CASE 
+						WHEN F.Källsystem <> 'Värdepapper' THEN 1
+						WHEN F.Källsystem = 'Värdepapper' AND K2.DepåTyp NOT IN (	'LII', 'LIA', 'LIC', 'PIA', 'PIC', 'PII', 'PTA', 
+																					'PTC', 'TIA', 'TIC', 'TPA', 'TPAC'
+																					-- 2016-05-09 CHG0056175 /SG 
+																					,'IRI', 'ROI', 'SIC', 'SIP'
+																					)
+						THEN 1 ELSE NULL END
+				GROUP BY 
+					CASE	WHEN K.Personnummer = '165164018276' THEN '165020173083' ELSE K.Personnummer END,
+					CASE	WHEN K.Personnummer = '165164018276' AND CIG.KOD IS NULL THEN '165020173083' 
+							WHEN CIG.KOD IS NULL THEN K.Personnummer ELSE NULL END,
+					CASE	WHEN K.Personnummer = '165164018276' AND CIG.KOD IS NOT NULL THEN '165020173083' 
+							WHEN CIG.KOD IS NOT NULL THEN K.Personnummer ELSE NULL END
+				--HAVING SUM(F.SaldoFörePeriod + ISNULL(FBM.Upplupen_Ränta_ACK,0)) >= @GarantiBelopp
+				HAVING SUM(	case when P.Produktbeskrivning = 'Fasträntekonto' then f.Inlåning else 
+								F.SaldoFörePeriod + ISNULL(FBM.Upplupen_Ränta_ACK,0) end) >= @GarantiBelopp
+			) Saldo
+
+		UNION ALL
+	--	SALDO PER PRODUKT
+	--	LAGT TILL FILTER PÅ VISSA DEPÅTYPER //SG
+		SELECT 
+			Radbeskrivning					= CASE WHEN P.Produktbeskrivning = 'Eurokonto' THEN P.Produktbeskrivning + ' (SEK)' ELSE P.Produktbeskrivning END,
+--			Saldo							= SUM(F.Inlåning + ISNULL(FBM.Upplupen_Ränta_ACK,0)),
+			Saldo							= SUM( CASE		WHEN P.Produktbeskrivning = 'Fasträntekonto' then F.Inlåning
+															ELSE F.Inlåning + ISNULL(FBM.Upplupen_Ränta_ACK,0) END),
+			SALDO_SEKTORKOD					= SUM (	CASE	WHEN CIG.KOD IS NULL and P.Produktbeskrivning = 'Fasträntekonto' then F.Inlåning 
+															WHEN CIG.KOD IS NULL and P.Produktbeskrivning <> 'Fasträntekonto' then F.SaldoFörePeriod + ISNULL(FBM.Upplupen_Ränta_ACK,0) 
+													ELSE 0 END ),
+
+			SALDO_SEKTORKOD_utan			= SUM (	CASE WHEN CIG.KOD IS NULL THEN F.SaldoFörePeriod ELSE 0 END ),
+
+			SALDO_SEKTORKOD_FILTER			= SUM ( CASE WHEN CIG.KOD IS NOT NULL THEN f.SaldoFörePeriod ELSE 0 END ),
+			 
+			AntalKunder						= COUNT(DISTINCT K.Personnummer),
+			AntalKunder_SEKTORKOD			= COUNT(DISTINCT CASE WHEN CIG.KOD IS NULL THEN K.Personnummer END),
+			AntalKunder_SEKTORKOD_FILTER	= COUNT(DISTINCT CASE WHEN CIG.KOD IS NOT NULL THEN K.Personnummer END),
+			SummaFilter						= 1,
+--			Upplupen_Ränta_ACK				= SUM(ISNULL(FBM.Upplupen_Ränta_ACK,0)),
+			Upplupen_Ränta_ACK			= SUM( case when p.Produktbeskrivning <> 'Fasträntekonto' then ISNULL(FBM.Upplupen_Ränta_ACK,0) else 0  end),
+
+			Upplupen_Ränta_eff_ACK			= SUM( case when p.Produktbeskrivning = 'Fasträntekonto' then f.Inlåning - f.SaldoFörePeriod else 0  end),	
+
+			Upplupen_Ränta_ACK_SEKTORKOD_FILTER		= SUM ( CASE WHEN CIG.KOD IS NOT NULL THEN ISNULL(FBM.Upplupen_Ränta_ACK,0) ELSE 0 END )					
+
+		FROM v_FactInlåning F
+			INNER JOIN v_DimKund K
+				ON F.KundID = K.KundID
+			INNER JOIN v_DimEkonomiProdukt P
+				ON F.EkonomiProduktID = P.EkonomiProduktID
+			LEFT JOIN v_DimVärdepapperkonto_Månad K2
+				ON F.Kontonummer = K2.Kontonummer AND F.Källsystem = 'Värdepapper'
+			LEFT JOIN CtrlInsättningsGaranti CIG
+				ON K.Sektorkod = CIG.KOD
+			LEFT JOIN #FACTBANKMÅNAD FBM
+				ON F.Kontonummer = FBM.KontoNummer	
+				 
+		WHERE 
+			F.Period = @Period AND
+			P.Produktbeskrivning NOT IN ('IPS') AND
+			F.Diff = 0	AND	-- exkluderar diffar
+			1 = CASE 
+				WHEN F.Källsystem <> 'Värdepapper' THEN 1
+				WHEN F.Källsystem = 'Värdepapper' AND K2.DepåTyp NOT IN (	'LII', 'LIA', 'LIC', 'PIA', 'PIC', 'PII', 'PTA', 
+																			'PTC', 'TIA', 'TIC', 'TPA', 'TPAC'
+																			-- 2016-05-09 CHG0056175 /SG 
+																			,'IRI', 'ROI', 'SIC', 'SIP'
+																			)
+				THEN 1 ELSE NULL END
+				
+		GROUP BY 
+			P.Produktbeskrivning
+		UNION ALL
+
+	--	EUROKONTO I EURO
+		SELECT 
+			Radbeskrivning					= P.Produktbeskrivning + ' (EUR)',
+			Saldo							= SUM(CONVERT(MONEY,F.Inlåning/@Eurokurs) + ISNULL(FBM.Upplupen_Ränta_ACK,0)),
+
+--			SALDO_SEKTORKOD					= SUM (	CASE WHEN CIG.KOD IS NULL THEN CONVERT(MONEY,F.Inlåning/@Eurokurs) + ISNULL(FBM.Upplupen_Ränta_ACK,0) ELSE 0 END ),
+			SALDO_SEKTORKOD					= SUM (	CASE WHEN CIG.KOD IS NULL THEN CONVERT(MONEY,F.SaldoFörePeriod/@Eurokurs) + ISNULL(FBM.Upplupen_Ränta_ACK,0) ELSE 0 END ),
+
+			SALDO_SEKTORKOD_utan			= SUM (	CASE WHEN CIG.KOD IS NULL THEN CONVERT(MONEY,F.SaldoFörePeriod/@Eurokurs) ELSE 0 END ),
+
+			SALDO_SEKTORKOD_FILTER			= SUM ( CASE WHEN CIG.KOD IS NOT NULL THEN CONVERT(MONEY,F.Inlåning/@Eurokurs) + ISNULL(FBM.Upplupen_Ränta_ACK,0) ELSE 0 END ), 
+			AntalKunder						= COUNT(DISTINCT K.Personnummer),
+			AntalKunder_SEKTORKOD			= COUNT(DISTINCT CASE WHEN CIG.KOD IS NULL THEN K.Personnummer END),
+			AntalKunder_SEKTORKOD_FILTER	= COUNT(DISTINCT CASE WHEN CIG.KOD IS NOT NULL THEN K.Personnummer END),
+			SummaFilter						= 0,
+--			Upplupen_Ränta_ACK				= SUM(ISNULL(FBM.Upplupen_Ränta_ACK,0)),
+			Upplupen_Ränta_ACK			= SUM( case when p.Produktbeskrivning <> 'Fasträntekonto' then ISNULL(FBM.Upplupen_Ränta_ACK,0) else 0  end),				
+
+			Upplupen_Ränta_eff_ACK			= SUM( case when p.Produktbeskrivning = 'Fasträntekonto' then f.Inlåning - f.SaldoFörePeriod else 0  end),	
+
+			Upplupen_Ränta_ACK_SEKTORKOD_FILTER		= SUM ( CASE WHEN CIG.KOD IS NOT NULL THEN ISNULL(FBM.Upplupen_Ränta_ACK,0) ELSE 0 END )	
+
+		FROM v_FactInlåning F
+			INNER JOIN v_DimKund K
+				ON F.KundID = K.KundID
+			INNER JOIN v_DimEkonomiProdukt P
+				ON F.EkonomiProduktID = P.EkonomiProduktID
+			LEFT JOIN CtrlInsättningsGaranti CIG
+				ON K.Sektorkod = CIG.KOD
+			LEFT JOIN #FACTBANKMÅNAD FBM
+				ON F.Kontonummer = FBM.KontoNummer
+								 
+		WHERE 
+			F.Period = @Period AND
+			P.Produktbeskrivning = 'Eurokonto' AND
+			F.Diff = 0		-- exkluderar diffar
+		GROUP BY 
+			P.Produktbeskrivning
+	) F
+	
+	ORDER BY 
+		CASE 
+			WHEN Radbeskrivning LIKE 'Kunder med saldo%' THEN 1
+			WHEN Radbeskrivning = 'Eurokonto (EUR)' THEN 2
+			WHEN Radbeskrivning = 'Eurokonto (SEK)' THEN 3
+			WHEN Radbeskrivning = 'Allt i Ett-konto' THEN 4
+			WHEN Radbeskrivning = 'Fasträntekonto' THEN 5
+			WHEN Radbeskrivning = 'Likviditetskonto' THEN 6
+			WHEN Radbeskrivning = 'Sparkonto' THEN 7
+			WHEN Radbeskrivning = 'Depåinlåning' THEN 8
+			WHEN Radbeskrivning = 'Betal och Kreditkort' THEN 9 
+			WHEN Radbeskrivning = 'Skandiakonto' THEN 10 END
+
+
+-------		INSERT VP DETALJER
+
+
+	INSERT INTO #REPORTTABLE2
+	(	Period,
+		Sort,
+		Radbeskrivning,
+		Radbeskrivning2,
+		Saldo,
+		SALDO_SEKTORKOD,
+		SALDO_SEKTORKOD_utan,
+		SALDO_SEKTORKOD_FILTER,
+		AntalKunder,
+		AntalKunder_SEKTORKOD,
+		AntalKunder_SEKTORKOD_FILTER,
+		GarantiBelopp,
+		Eurokurs,
+		SummaFilter,
+		Upplupen_Ränta_ACK,
+		Upplupen_Ränta_eff_ACK,
+		Upplupen_Ränta_ACK_SEKTORKOD_FILTER
+	)
+	SELECT
+		
+		Period							= P.ÅrMånad,
+		Sort							= 0,
+		Radbeskrivning					= KO.DepåTyp,
+		Radbeskrivning2					= '',
+		Saldo							= SUM(F.LikvidSaldo),
+		SALDO_SEKTORKOD					= SUM (	CASE WHEN CIG.KOD IS NULL THEN F.LikvidSaldo ELSE 0 END ),
+
+		SALDO_SEKTORKOD_utan			= SUM (	CASE WHEN CIG.KOD IS NULL THEN F.LikvidSaldo ELSE 0 END ),
+
+		SALDO_SEKTORKOD_FILTER			= SUM (	CASE WHEN CIG.KOD IS NOT NULL THEN F.LikvidSaldo ELSE 0 END ),
+		AntalKunder						= COUNT(DISTINCT K.Personnummer),
+		AntalKunder_SEKTORKOD			= COUNT(DISTINCT CASE WHEN CIG.KOD IS NULL THEN K.Personnummer END),
+		AntalKunder_SEKTORKOD_FILTER	= COUNT(DISTINCT CASE WHEN CIG.KOD IS NOT NULL THEN K.Personnummer END),
+		GarantiBelopp					= @Garantibelopp,
+		Eurokurs						= @Eurokurs,
+		SummaFilter						= 3,						-- DETALJER VP
+		Upplupen_Ränta_ACK						= 0,
+
+		Upplupen_Ränta_eff_ACK			= 0,
+
+		Upplupen_Ränta_ACK_SEKTORKOD_FILTER		= 0
+
+	FROM v_FactVärdepapper_Månad F
+		INNER JOIN v_DimPeriod P
+			ON F.Period = P.Period
+		INNER JOIN v_DimKund K
+			ON F.KundID = K.KundID
+		INNER JOIN v_DimVärdepapperKonto_Månad KO
+			ON F.VärdepapperKontoID = KO.VärdepapperKontoID
+		LEFT JOIN CtrlInsättningsGaranti CIG
+			ON K.Sektorkod = CIG.KOD 
+	WHERE 
+		P.ÅrMånad = @Period AND
+		F.LikvidSaldo > 0 AND
+		--MFI FILTER
+		KO.Depåtyp IN (SELECT DISTINCT DepåTyp FROM v_DimDepåtyp_Inkludera) AND
+		--INSÄTTNINGSGARANTI FILTER
+		KO.DepåTyp NOT IN (	'IPS DEPÅER','LII', 'LIA', 'LIC', 'PIA', 'PIC', 'PII', 'PTA', 
+									'PTC', 'TIA', 'TIC', 'TPA', 'TPAC'
+									-- 2016-05-09 CHG0056175 /SG 
+									,'IRI', 'ROI', 'SIC', 'SIP'
+									)
+			
+	GROUP BY 
+		P.ÅrMånad,
+		KO.DepåTyp
+
+-------	RAPPORT SELECT
+
+	SELECT 
+		Period,
+		Sort,
+		Radbeskrivning,
+		Radbeskrivning2,
+		Saldo_gamla_rapporten					= Saldo,
+		Upplupen_Ränta_ACK						= Upplupen_Ränta_ACK,
+
+		Upplupen_Ränta_eff_ACK					= Upplupen_Ränta_eff_ACK,
+
+		Upplupen_Ränta_ACK_SEKTORKOD_FILTER		= Upplupen_Ränta_ACK_SEKTORKOD_FILTER,
+		AntalKunder_gamla_rapporten				= AntalKunder,
+		GarantiBelopp,
+		Eurokurs,
+		SummaFilter,
+		Saldo_på_dom_som_omfattas				= SALDO_SEKTORKOD,
+
+		SALDO_SEKTORKOD_utan					= SALDO_SEKTORKOD_utan,
+
+		Saldo_på_dom_som_inte_omfattas			= SALDO_SEKTORKOD_FILTER,
+		--SALDO_DIFF = Saldo - SALDO_SEKTORKOD - SALDO_SEKTORKOD_FILTER,
+		AntalKunder_SEKTORKOD,
+		AntalKunder_SEKTORKOD_FILTER,
+		--ANTALKUNDER_DIFF = AntalKunder - AntalKunder_SEKTORKOD - AntalKunder_SEKTORKOD_FILTER,
+		Garanterat_saldo_gamla_rapporten		= AntalKunder * @GarantiBelopp,
+		Garanterat_saldo_på_dom_som_omfattas	= AntalKunder_SEKTORKOD * @GarantiBelopp
+
+	FROM #REPORTTABLE2
+	ORDER BY 
+		CASE 
+			WHEN Radbeskrivning LIKE 'Kunder med saldo%' THEN 1
+			WHEN Radbeskrivning = 'Eurokonto (EUR)' THEN 2
+			WHEN Radbeskrivning = 'Eurokonto (SEK)' THEN 3
+			WHEN Radbeskrivning = 'Allt i Ett-konto' THEN 4
+			WHEN Radbeskrivning = 'Fasträntekonto' THEN 5
+			WHEN Radbeskrivning = 'Likviditetskonto' THEN 6
+			WHEN Radbeskrivning = 'Sparkonto' THEN 7
+			WHEN Radbeskrivning = 'Depåinlåning' THEN 8
+			WHEN Radbeskrivning = 'Betal och Kreditkort' THEN 9 
+			WHEN Radbeskrivning = 'Skandiakonto' THEN 10 END
+	END
+	
+
+ /* GAMMAL PROCEDUR FÖR PERIOD FÖRE 2011-12
+
+ELSE
+
+----------	RAPPORTFRÅGA FÖRE PERIOD 2011-12
+
+	SELECT 
+		Period			= @Period,
+		Sort			= CASE 
+							WHEN Radbeskrivning LIKE 'Kunder med saldo%' THEN 1
+							WHEN Radbeskrivning = 'Eurokonto (EUR)' THEN 2
+							WHEN Radbeskrivning = 'Eurokonto (SEK)' THEN 3
+							WHEN Radbeskrivning = 'Allt i Ett-konto' THEN 4
+							WHEN Radbeskrivning = 'Fasträntekonto' THEN 5
+							WHEN Radbeskrivning = 'Likviditetskonto' THEN 6
+							WHEN Radbeskrivning = 'Sparkonto' THEN 7
+							WHEN Radbeskrivning = 'Depåinlåning' THEN 8
+							WHEN Radbeskrivning = 'Betal och Kreditkort' THEN 9 
+							WHEN Radbeskrivning = 'Skandiakonto' THEN 10 END,
+		Radbeskrivning,
+		Radbeskrivning2	= CASE
+							WHEN Radbeskrivning = 'Eurokonto (SEK)' THEN 'Konto 221121, produkt 51'
+							WHEN Radbeskrivning = 'Allt i Ett-konto' THEN 'Konto 221120, produkt 51-56, 91-92, 10-102'
+							WHEN Radbeskrivning = 'Fasträntekonto' THEN 'Konto 251210'
+							WHEN Radbeskrivning = 'Likviditetskonto' THEN 'Konto 221120, produkt 71-79'
+							WHEN Radbeskrivning = 'Sparkonto' THEN 'Konto 221130'
+							WHEN Radbeskrivning = 'Depåinlåning' THEN 'Konto 223202'
+							WHEN Radbeskrivning = 'Betal och Kreditkort' THEN 'Konto 221410' 
+							WHEN Radbeskrivning = 'Skandiakonto' THEN 'Konto 221110' ELSE '' END,
+		Saldo,
+		AntalKunder,
+		GarantiBelopp	= @Garantibelopp,
+		Eurokurs		= @Eurokurs,
+		SummaFilter
+	FROM (
+	--	SALDO PER PERSONNUMMER STÖRRE ÄN GARANTIBELOPP
+		SELECT	
+			Radbeskrivning	= 'Kunder med saldo >= ' + CONVERT(VARCHAR(12),@GarantiBelopp),
+			Saldo			= SUM(Saldo),
+			AntalKunder		= COUNT(DISTINCT Personnummer),
+			SummaFilter		= 0
+
+		FROM (
+				SELECT
+					Personnummer	= CASE WHEN K.Personnummer = '165164018276' THEN '165020173083' ELSE K.Personnummer END,
+					Saldo			= SUM(F.Inlåning)	-- OBS! i inlåning är casen gjord på fasträntekonto
+				FROM v_FactInlåning F
+					INNER JOIN v_DimKund K
+						ON F.KundID = K.KundID
+					INNER JOIN v_DimEkonomiProdukt P
+						ON F.EkonomiProduktID = P.EkonomiProduktID
+				WHERE 
+					F.Period = @Period AND
+					P.Produktbeskrivning NOT IN ('IPS', 'Betal och Kreditkort') AND	-- TROR ATT DETTA FILTER VAR FEL TIDIGARE, ÄNDRAT I KODEN FÖR NYA PERIODER //SG
+					F.Diff = 0		-- exkluderar diffar
+				GROUP BY 
+					CASE WHEN K.Personnummer = '165164018276' THEN '165020173083' ELSE K.Personnummer END
+				HAVING SUM(F.Inlåning) >= @GarantiBelopp
+			) Saldo
+
+		UNION ALL
+	--	SALDO PER PRODUKT
+		SELECT 
+			Radbeskrivning	= CASE WHEN P.Produktbeskrivning = 'Eurokonto' THEN P.Produktbeskrivning + ' (SEK)' ELSE P.Produktbeskrivning END,
+			Saldo			= SUM(F.Inlåning),
+			AntalKunder		= COUNT(DISTINCT K.Personnummer),
+			SummaFilter		= 1
+
+		FROM v_FactInlåning F
+			INNER JOIN v_DimKund K
+				ON F.KundID = K.KundID
+			INNER JOIN v_DimEkonomiProdukt P
+				ON F.EkonomiProduktID = P.EkonomiProduktID
+		WHERE 
+			F.Period = @Period AND
+			P.Produktbeskrivning NOT IN ('IPS') AND
+			F.Diff = 0		-- exkluderar diffar
+		GROUP BY 
+			P.Produktbeskrivning
+
+		UNION ALL
+	--	EUROKONTO I EURO
+		SELECT 
+			Radbeskrivning	= P.Produktbeskrivning + ' (EUR)',
+			Saldo			= SUM(CONVERT(MONEY,F.Inlåning/@Eurokurs)),
+			AntalKunder		= COUNT(DISTINCT K.Personnummer),
+			SummaFilter		= 0
+
+		FROM v_FactInlåning F
+			INNER JOIN v_DimKund K
+				ON F.KundID = K.KundID
+			INNER JOIN v_DimEkonomiProdukt P
+				ON F.EkonomiProduktID = P.EkonomiProduktID
+		WHERE 
+			F.Period = @Period AND
+			P.Produktbeskrivning = 'Eurokonto' AND
+			F.Diff = 0		-- exkluderar diffar
+		GROUP BY 
+			P.Produktbeskrivning
+	) F
+
+	ORDER BY 
+		CASE 
+			WHEN Radbeskrivning LIKE 'Kunder med saldo%' THEN 1
+			WHEN Radbeskrivning = 'Eurokonto (EUR)' THEN 2
+			WHEN Radbeskrivning = 'Eurokonto (SEK)' THEN 3
+			WHEN Radbeskrivning = 'Allt i Ett-konto' THEN 4
+			WHEN Radbeskrivning = 'Fasträntekonto' THEN 5
+			WHEN Radbeskrivning = 'Likviditetskonto' THEN 6
+			WHEN Radbeskrivning = 'Sparkonto' THEN 7
+			WHEN Radbeskrivning = 'Depåinlåning' THEN 8
+			WHEN Radbeskrivning = 'Betal och Kreditkort' THEN 9 
+			WHEN Radbeskrivning = 'Skandiakonto' THEN 10 END
+*/
+/*	GAMMAL PROCEDUR TILL BO RAPPORT
+	
+CREATE PROCEDURE [dbo].[lp_garantisaldo]
+@eurokurs float,
+@runperiod char(4)	-- Format ååmm
+/************************************************************************************************************************/
+/*	ANVÄNDS AV PROGRAM :	Garantisaldo	                     							*/
+/*	FUNKTION:				Laddar data till tabellen ADHOCK..InsattarGaranti              			*/
+/*	BESKRIVNING: 			Räknar ut garantisaldo för underlag till garantiavgift				*/                
+/*  FÖRUTSÄTTNINGAR:		jobben KUND_ENG och Räntestatistik_allajobs 				*/
+/*							måste ha kört klart.								*/
+/*							Måste köras i Januari								*/
+/*							Euro kursen anges som inparameter 1						*/
+/*							Period anges som inparameter 2							*/
+/*															*/
+/*	Exempel för rapport som tas ut i Januari 2007: 									*/
+/*	adhock.dbo.lp_garantisaldo 9.02616,'0612'									*/
+/*															*/
+/*	SKAPAD :Thomas Rodny	DATUM : 020417										*/
+/*	ANDRAD :Thomas Rodny	DATUM : 050407										*/
+/*	ANDRAD :Thomas Rodny	DATUM : 051128										*/
+/*	ANDRAD :Rikard Karlsson	DATUM : 0702										*/
+/*	ANDRAD :Jesper Wedholm	DATUM : 20081209
+            - Diverse ändringar
+            - La till en kolumn PeriodTom i InsattarGaranti.
+            - Läser regelenheter och produktnamn från styrtabeller.
+              Generellt gäller att regelenheter som ska exkluderas hämtas
+               från tabell gemensam..regelenhet där kolumnen Exkludera är satt
+               till 'J'.
+               Namn på konton hämtas från tabellen gemensam..kontotyp.
+               Fortfarande är strängen för värdepapper hårdkodad.
+            - Läser från historiktabellen (saldo..saldo_bank_hist) istället för från
+               saldo..saldo_kre för kreditkort vilket gör att outputen från denna
+               procedur inte beror av när i tiden den exekveras dvs man kan köra den
+               när som helst och ange önskad period
+            - Körningar sparas nu en per dag istället för en per månad
+            - Aktieinfo hämtas nu direkt från aktie_infil (dess historiktabell aktie_hist) istället
+               för från aktiekund, detta beroende på att aktiekund innehåller en
+               uppsummering per kund där villkoret saldo > 0 ej använts. Vi vill ha på
+               kontonivå här så att vi kan exkludera konton med saldo < 0.
+               Har då också lagt till inkludering av depåtyper här enl. rapportkrav.
+               Dessa inkluderade depåtyper ligger i tabell gemensam..depåtyp
+/*	ANDRAD : Stefan Granah	DATUM : 20100215									*/	
+			- ändrat garantibelopp till 512 000 enligt mail från Cecilia Luiga
+          
+   
+
+*/
+/************************************************************************************************************************/
+AS
+
+SET NOCOUNT ON
+
+DECLARE @sqlstring as varchar(1000),
+         @garantibelopp int,
+         @periodtom datetime
+
+-- Sätt gällande garantibelopp
+select @garantibelopp = 512000;
+
+-- Sätt vilken t.o.m. period denna körning gäller
+-- Vill ha sista dagen i månaden, tag inputen @runperiod, addera 1 månad och sen ta bort 1 dag
+select @periodtom = dateadd(d,-1,dateadd(m,1,convert(datetime, @runperiod + '01',112)))
+
+
+-- Hämta från historiktabellerna enl. inmatad period
+
+CREATE TABLE #saldo
+(
+pers_nr char(10),
+konto_id char(11),
+kontotyp char(3),
+regelenhet char(3),
+period char(4),
+saldo decimal (18,2),
+kreditbelopp decimal(18,2)
+)
+
+/* Specialbehandling: För juridiska organisationsnummer som tillhör Skandia
+   gäller att inlåningssaldon ska slås samman för organisationsnummer 516401-8276
+   och 502017-3083 och också räknas som en kund => låt den första slås samman
+   med det andra numret, vi gör det redan här så behöver vi inte göra nåt mer sen.
+*/
+SET @sqlstring='insert into #saldo select case when pers_nr = ''5164018276'' then ''5020173083''' +
+               ' else pers_nr end, konto_id,kontotyp,regelenhet,period,saldo,kreditbelopp' +
+               ' from saldo.dbo.saldo' + @runperiod
+EXECUTE (@sqlstring)
+
+select
+case when pers_nr = '5164018276' then '5020173083' else pers_nr end as pers_nr,
+depatyp,
+likvidsaldo
+into #aktie
+from aktie.dbo.aktie_hist
+where period = @periodtom;
+
+select
+case when pers_nr = '5164018276' then '5020173083' else pers_nr end as pers_nr,
+konto_id,
+kontotyp,
+regelenhet,
+saldo
+into #saldo_kre
+from saldo..saldo_bank_hist
+where per_datum = @periodtom;
+
+
+
+
+/*
+	Endast ett resultat per dag får finnas i tabellen eftersom upplösningen på extraktdatum
+   är dag.
+	Senaste körningen utifrån extraktdatum plockas upp i BO rapporten
+*/
+DELETE FROM ADHOCK..InsattarGaranti
+WHERE ExtraktDatum = convert(char(8),getdate(),112)
+
+
+/*
+	Plocka ut saldo från bank
+   Gruppera på person och produkttyp (ej Eurokonto, Eurokonto)
+*/
+
+SELECT 
+	s.pers_nr AS PersonNummer, 
+	Typ=CASE WHEN s.kontotyp<>'601' THEN 'bank                ' ELSE 'euro                ' END,
+	SUM(s.saldo) AS Belopp
+INTO #garantisaldo
+FROM #saldo s
+WHERE s.saldo > 0
+	AND s.kontotyp in ('001', '002', '003', '006','601')
+	AND s.regelenhet not in (select regelenhet from gemensam..regelenhet
+                           where kontotyp = s.kontotyp
+                           and exkludera = 'J')
+GROUP BY 
+	pers_nr,
+	CASE WHEN kontotyp<>'601' THEN 'bank                ' ELSE 'euro                ' END
+
+
+
+/*
+	Plocka ut saldo från "Aktie"
+*/
+
+INSERT INTO #garantisaldo 
+SELECT
+	CASE WHEN pers_nr IS NULL THEN '0' ELSE pers_nr END, 
+	'aktie',
+	SUM(likvidsaldo) 
+FROM #aktie
+WHERE likvidsaldo > 0 
+and depatyp in (select depåtyp from gemensam..depåtyp
+                  where inkludera = 'J')
+GROUP BY 
+	pers_nr
+
+
+
+
+/*************************************************************************************/
+/************** Skapa resultat till rapport tabellen adhock..InsattarGaranti *********/
+/*************************************************************************************/
+
+-- Ta 2:a raden först så att vi sen kan räkna om Eurokonton till SEK och få med det i totalen
+-- Eurokonto i EUR
+INSERT INTO ADHOCK.dbo.InsattarGaranti
+SELECT 
+	2,
+	(select klartext + ' (EUR)' from gemensam..kontotyp where konto_typ = 601),
+	'',
+	'',
+	SUM(Belopp), 
+	count(PersonNummer),
+	@eurokurs,
+	convert(char(8),getdate(),112),
+	'adhock..lp_garantisaldo',
+   @periodtom
+FROM #garantisaldo 
+WHERE TYP='euro'
+
+--Räkna om till SEK
+UPDATE #garantisaldo 
+SET belopp = (belopp * @eurokurs) 
+WHERE typ='euro' 
+
+
+-- 1:a raden
+-- Summera först per kund
+SELECT 
+	PersonNummer,
+	SUM(Belopp) AS Belopp
+INTO #temptabell
+FROM #garantisaldo 
+--WHERE typ<>'fond 221190' 
+GROUP BY PersonNummer
+
+
+--Summera sedan över alla kunder
+INSERT INTO ADHOCK.dbo.InsattarGaranti
+SELECT 
+	1,
+	'Kunder med saldo >= ' + cast(@garantibelopp as varchar(20)),
+	'',
+	'',
+	SUM(Belopp),
+	COUNT(*),
+	@eurokurs,
+	convert(char(8),getdate(),112),
+	'adhock..lp_garantisaldo',
+   @periodtom
+FROM #temptabell
+WHERE Belopp >= @garantibelopp;
+
+
+-- 3:e raden (Eurokonto i SEK)
+INSERT INTO ADHOCK.dbo.InsattarGaranti
+SELECT 
+	3,
+	(select klartext + ' (SEK)' from gemensam..kontotyp where konto_typ = 601),
+	'Konto 221121, produkt 51',
+	'',
+	SUM(Belopp),
+	null, -- vi har redan räknat dessa personer
+	@eurokurs,
+	convert(char(8),getdate(),112),
+	'adhock..lp_garantisaldo',
+   @periodtom
+FROM  #garantisaldo 
+WHERE Typ='euro'
+
+
+
+-- 4.e till 7:e raden (vanliga bankkonton)
+INSERT INTO ADHOCK.dbo.InsattarGaranti
+SELECT
+	case s.kontotyp
+      when '001' then 4
+      when '002' then 5
+      when '003' then 6
+      when '006' then 7
+   end, 
+	k.klartext,
+	case s.kontotyp
+      when '001' then 'Konto 221120, produkt 51-56, 91-92, 10-102'
+      when '002' then 'Konto 251210'
+      when '003' then 'Konto 221120, produkt 71-79'
+      when '006' then 'Konto 221130'
+   end, 
+	'',
+	SUM(s.saldo),
+	count(s.pers_nr),
+	@eurokurs,
+	convert(char(8),getdate(),112),
+	'adhock..lp_garantisaldo',
+   @periodtom
+FROM #saldo s
+inner join gemensam..kontotyp k on (k.konto_typ = cast(s.kontotyp as int))
+WHERE s.kontotyp in ('001','002','003','006')
+	AND s.saldo > 0 
+	AND s.regelenhet not in (select regelenhet from gemensam..regelenhet
+                           where kontotyp = s.kontotyp
+                           and exkludera = 'J')
+group by s.kontotyp, k.klartext
+
+
+-- 8:e raden (värdepapper)
+INSERT INTO ADHOCK.dbo.InsattarGaranti
+SELECT 
+	8,
+	'Värdepapper',
+	'Konto 223202',
+	'',
+	SUM(Belopp),
+	count(PersonNummer),
+	@eurokurs,
+	convert(char(8),getdate(),112),
+	'adhock..lp_garantisaldo',
+   @periodtom
+FROM #garantisaldo 
+WHERE Typ='aktie' 
+
+
+-- 9:e raden (Betal & kreditkort)
+INSERT INTO ADHOCK.dbo.InsattarGaranti
+SELECT
+	9, 
+	k.klartext,
+	'Konto 221410',
+	'',
+	SUM(sk.Saldo),
+	count(sk.pers_nr),
+	@eurokurs,
+	convert(char(8),getdate(),112),
+	'adhock..lp_garantisaldo',
+   @periodtom
+FROM #saldo_kre sk
+inner join gemensam..kontotyp k on (k.konto_typ = cast(sk.kontotyp as int))
+WHERE sk.kontotyp = '030'
+	AND sk.Saldo > 0
+	AND sk.regelenhet not in (select regelenhet from gemensam..regelenhet
+                           where kontotyp = sk.kontotyp
+                           and exkludera = 'J')
+GROUP BY klartext
+
+*/
+
+
+GO
+
+
