@@ -1,0 +1,64 @@
+USE [MART]
+GO
+
+/****** Object:  StoredProcedure [ssrs].[usp_TMS_Inlåningsrapport_LCR_EBA_ITS_Daglig_2019_REQ0452577_rpt]    Script Date: 2020-11-04 16:29:16 ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+
+
+
+CREATE PROCEDURE [ssrs].[usp_TMS_Inlåningsrapport_LCR_EBA_ITS_Daglig_2019_REQ0452577_rpt]
+@Datum DATE = NULL
+AS
+
+/*****************************************************************************************************
+Beskrivning : Beställare: Carl Johan Strandberg - CHG0055441 - Inlåningsrapport ny LCR - Daglig
+Kommentar   : KOPIA av Månadsrapporten "Inlåningsrapport LCR enligt EBA_ITS_2015-04"
+Exempel     : 
+			:	Rapportägare:			 Olof Klockhoff
+			:	Avstämningsfrekvens:
+			:	
+			:	Syfte:	Vi använder idag en kub för inlåningen när vi beräknar LCR. Vi måste nu 
+			:	räkna LCR enligt en ny standard och vill därför beställa en ny utsökning, och vill helst 
+			:	att det är i form av en rapport och inte en kub om möjligt. 
+			:	
+			:	EXEC [ssrs].[usp_TMS_Inlåningsrapport_LCR_EBA_ITS_Daglig_rpt] '2019-08-01'
+******************************************************************************************************
+Skapad av   : Stefan Granath
+Datum       : 2016-04-12
+******************************************************************************************************
+Reviderad   : Robert Juhlin
+Datum       : 2019-08-07
+Kommentar   : Ändrat till nya tabellen REQ0368448
+******************************************************************************************************
+Reviderad   : 
+Datum       : 
+Kommentar   : 
+******************************************************************************************************/
+	
+	SELECT
+		Radsortering	= Radkod,	
+		RadNamn,			
+		RadKod,			
+		Nivå			= NULL,			
+		Datum			= [Period],			
+		SaldoEUR		= SaldoEUR,
+		SaldoSEK		= SaldoSEK,
+		SaldoTotal		= [Saldo Total],					
+		FontWeight,	
+		TextDecoration,
+		BackgroundColor,												
+		LeftIndent		
+						
+	FROM ssrs.TMS_Inlåningsrapport_LCR_EBA_ITS_2019_REQ0452577_rpt
+	WHERE [Period] = @Datum
+
+
+GO
+
+
